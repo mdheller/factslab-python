@@ -1,9 +1,12 @@
 import numpy as np
+import pandas as pd
 import torch
 import torch.autograd
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn import LSTM
+from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
+from scipy.special import huber
 
 from random import shuffle
 from collections import Iterable
@@ -54,8 +57,6 @@ class RNNRegression(torch.nn.Module):
         must be same length as rnn_hidden_size
     bidirectional : bool or iterable(bool)
         must be same length as rnn_hidden_size
-    regression_type : str
-        only linear regression currently supported
     regression_hidden_sizes : iterable(int)
         the size of the hidden states in each layer of a
         multilayer regression, going from input (RNN hidden state)
@@ -67,7 +68,7 @@ class RNNRegression(torch.nn.Module):
 
     def __init__(self, embeddings=None, embedding_size=None, vocab=None,
                  rnn_classes=LSTM, rnn_hidden_sizes=300,
-                 num_rnn_layers=1, bidirectional=False, regression_type="linear",
+                 num_rnn_layers=1, bidirectional=False,
                  regression_hidden_sizes=[], output_size=1, gpu=False):
         super().__init__()
 
@@ -78,8 +79,7 @@ class RNNRegression(torch.nn.Module):
         self._initialize_embeddings(embeddings, vocab)
         self._initialize_rnn(rnn_classes, rnn_hidden_sizes,
                              num_rnn_layers, bidirectional)
-        self._initialize_regression(regression_type,
-                                    regression_hidden_sizes,
+        self._initialize_regression(regression_hidden_sizes,
                                     output_size)
 
     def _homogenize_parameters(self, rnn_classes, rnn_hidden_sizes,
@@ -171,10 +171,7 @@ class RNNRegression(torch.nn.Module):
             
         self.rnn_output_size = output_size
 
-    def _initialize_regression(self, regression_type,
-                               hidden_sizes, output_size):
-        self._regression_type = regression_type
-        
+    def _initialize_regression(self, hidden_sizes, output_size):        
         self.linear_maps = []
 
         last_size = self.rnn_output_size
@@ -273,33 +270,67 @@ class RNNRegression(torch.nn.Module):
     
 class RNNRegressionTrainer(object):
 
-    def __init__(self, loss_function_class=torch.nn.MSELoss,
+    loss_function_map = {"linear": MSELoss,
+                         "robust": L1Loss,
+                         "robust_smooth": SmoothL1Loss,
+                         "multinomial": CrossEntropyLoss} 
+    
+    def __init__(self, regression_type="linear",
                  optimizer_class=torch.optim.Adam, gpu=False, **kwargs):
-        self._regression = RNNRegression(gpu=gpu, **kwargs)
-        self._loss_function = loss_function_class()
+        self._regression_type = regression_type
         self._optimizer_class = optimizer_class
-
-        self.gpu = gpu
+        self._init_kwargs = kwargs
         
-        if gpu:
+        self._continuous = regression_type != "multinomial"
+        
+        self.gpu = gpu
+
+    def _initialize_regression(self):
+        if self._continuous:
+            self._regression = RNNRegression(gpu=self.gpu,
+                                             **self._init_kwargs)
+        else:
+            output_size = np.unique(self._Y).shape[0]
+            self._regression = RNNRegression(output_size=output_size,
+                                             gpu=self.gpu,
+                                             **self._init_kwargs)
+
+        lf_class = self.__class__.loss_function_map[self._regression_type]
+        self._loss_function = lf_class()
+
+        if self.gpu:
             self._regression = self._regression.cuda()
-            self._loss_function = self._loss_function.cuda()
-
-
-    def fit(self, structures, targets, batch_size=100, verbosity=1, **kwargs):
+            self._loss_function = self._loss_function.cuda()        
+        
+    def fit(self, X, Y, batch_size=100, verbosity=1, **kwargs):
         """Fit the LSTM regression
 
         Parameters
         ----------
-        structures : iterable(iterable(object))
-        targets : numpy.array(Number)
+        X : iterable(iterable(object))
+            a matrix of structures (independent variables) with rows
+            corresponding to a particular kind of RNN
+        Y : numpy.array(Number)
+            a matrix of dependent variables
+        batch_size : int (default: 100)
+        verbosity : int (default: 1)
+            how often to print metrics (never if 0)
         """
-        
+
+        self._X, self._Y = X, Y
+
+        self._initialize_regression()
+
         optimizer = self._optimizer_class(self._regression.parameters(),
                                           **kwargs)
-
-        # each element is of the form ((struct1, struct2, ...), target)
-        structures_targets = list(zip(zip(*structures), targets))
+        
+        if not self._continuous:
+            Y_counts = np.bincount(self._Y)
+            self._Y_logprob = np.log(Y_counts)-np.log(np.sum(Y_counts))
+        
+        # each element is of the form ((struct1, struct2, ...),
+        #                              target)
+        structures_targets = list(zip(zip(*X), Y))
 
         loss_trace = []
         targ_trace = []
@@ -308,23 +339,30 @@ class RNNRegressionTrainer(object):
             losses = []
             
             shuffle(structures_targets)
-            structures_targets_part = partition(structures_targets, batch_size)
+            part = partition(structures_targets, batch_size)
             
-            for i, structs_targs_batch in enumerate(structures_targets_part):
+            for i, structs_targs_batch in enumerate(part):
 
                 optimizer.zero_grad()
 
                 for struct, targ in structs_targs_batch:
                     targ_trace.append(targ)
-                    
-                    targ = torch.FloatTensor([targ])
+
+                    if self._continuous:
+                        targ = torch.FloatTensor([targ])
+                    else:
+                        targ = torch.LongTensor([int(targ)])
+                        
                     targ = targ.cuda() if self.gpu else targ
                     targ = Variable(targ, requires_grad=False)
 
                     predicted = self._regression(struct)
                     # predicted = predicted.expand_as(targ)
 
-                    loss = self._loss_function(predicted, targ)
+                    if self._continuous:
+                        loss = self._loss_function(predicted, targ)
+                    else:
+                        loss = self._loss_function(predicted[None,:], targ)
 
                     losses.append(loss)
 
@@ -339,10 +377,48 @@ class RNNRegressionTrainer(object):
                 # TODO: generalize for non-linear regression
                 if verbosity and i:
                     if not i % verbosity:
-                        resid_var = np.mean(loss_trace)
-                        targ_var = np.var(targ_trace)
-                        r2 = 1. - (resid_var/targ_var)
-                        
-                        print(i, '\t', np.round(r2, 3))
+                        self._print_metric(i, loss_trace, targ_trace)
                         loss_trace = []
                         targ_trace = []
+
+    def _print_metric(self, i, loss_trace, targ_trace):
+
+        sigdig = 3
+        
+        if self._continuous:
+            resid_mean = np.mean(loss_trace)
+
+            if self._regression_type == "linear":
+                targ_var = np.mean(np.square(np.array(targ_trace)-np.mean(self._Y)))
+                r2 = 1. - (resid_mean/targ_var)
+                
+                print(str(i)+'\t residual variance:\t', np.round(resid_mean, sigdig), '\n',
+                      ' \t total variance:\t', np.round(targ_var, sigdig), '\n',
+                      ' \t r-squared:\t\t', np.round(r2, sigdig), '\n')
+                
+            elif self._regression_type == "robust":
+                ae = np.abs(targ_trace-np.median(self._Y))
+                mae = np.mean(ae)
+                pmae = 1. - (resid_mean/mae)
+
+                print(str(i)+'\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
+                      ' \t total absolute error:\t\t', np.round(mae, sigdig), '\n',
+                      ' \t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
+                
+            elif self._regression_type == "robust_smooth":
+                ae = huber(1., targ_trace-np.median(self._Y))
+                mae = np.mean(ae)
+                pmae = 1. - (resid_mean/mae)
+
+                print(str(i)+'\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
+                      ' \t total absolute error:\t\t', np.round(mae, sigdig), '\n',
+                      ' \t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
+
+        else:
+            model_mean_neglogprob = np.mean(loss_trace)
+            targ_mean_neglogprob = -np.mean(self._Y_logprob[targ_trace])
+            pnlp = 1. - (model_mean_neglogprob/targ_mean_neglogprob)
+            
+            print(str(i)+'\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
+                  ' \t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
+                  ' \t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
