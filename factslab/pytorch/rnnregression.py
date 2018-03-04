@@ -4,6 +4,7 @@ import torch
 import torch.autograd
 import torch.nn.functional as F
 from torch.autograd import Variable
+from torch.nn import Parameter
 from torch.nn import LSTM
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
 from scipy.special import huber
@@ -57,6 +58,8 @@ class RNNRegression(torch.nn.Module):
         must be same length as rnn_hidden_size
     bidirectional : bool or iterable(bool)
         must be same length as rnn_hidden_size
+    attention : bool
+        whether to use attention on the final RNN
     regression_hidden_sizes : iterable(int)
         the size of the hidden states in each layer of a
         multilayer regression, going from input (RNN hidden state)
@@ -68,7 +71,7 @@ class RNNRegression(torch.nn.Module):
 
     def __init__(self, embeddings=None, embedding_size=None, vocab=None,
                  rnn_classes=LSTM, rnn_hidden_sizes=300,
-                 num_rnn_layers=1, bidirectional=False,
+                 num_rnn_layers=1, bidirectional=False, attention=False,
                  regression_hidden_sizes=[], output_size=1, gpu=False):
         super().__init__()
 
@@ -79,7 +82,8 @@ class RNNRegression(torch.nn.Module):
         self._initialize_embeddings(embeddings, vocab)
         self._initialize_rnn(rnn_classes, rnn_hidden_sizes,
                              num_rnn_layers, bidirectional)
-        self._initialize_regression(regression_hidden_sizes,
+        self._initialize_regression(attention,
+                                    regression_hidden_sizes,
                                     output_size)
 
     def _homogenize_parameters(self, rnn_classes, rnn_hidden_sizes,
@@ -171,11 +175,17 @@ class RNNRegression(torch.nn.Module):
             
         self.rnn_output_size = output_size
 
-    def _initialize_regression(self, hidden_sizes, output_size):        
+    def _initialize_regression(self, attention, hidden_sizes, output_size):        
         self.linear_maps = []
-
+        
         last_size = self.rnn_output_size
 
+        self.attention = attention
+        
+        if attention:
+            self.attention_map = Parameter(torch.zeros(last_size),
+                                          requires_grad=True)
+            
         for h in hidden_sizes:
             linmap = torch.nn.Linear(last_size, h)
             linmap = linmap.cuda() if self.gpu else linmap
@@ -213,12 +223,20 @@ class RNNRegression(torch.nn.Module):
             raise ValueError(msg)
         
         inputs = self._get_inputs(words)
-
-        # passes inputs through tanh before sending them
-        # through the tree; done to make the verb reps
-        # learned more feature-like
         inputs = self._preprocess_inputs(inputs)
         
+        h_all, h_last = self._run_rnns(inputs, structures)
+        
+        if self.attention:
+            h_last = self._run_attention(h_all)
+
+        h_last = self._run_regression(h_last)
+
+        y_hat = self._postprocess_outputs(h_last)
+        
+        return y_hat
+
+    def _run_rnns(self, inputs, structures):
         for rnn, structure in zip(self.rnns, structures):            
             if isinstance(rnn, ChildSumTreeLSTM):
                 h_all, h_last = rnn(inputs, structure)
@@ -226,17 +244,27 @@ class RNNRegression(torch.nn.Module):
                 h_all, h_last = rnn(inputs[:,None,:])
 
             inputs = h_all.squeeze()
-            
+
+        return h_all, h_last
+
+    def _run_attention(self, h_all, return_weights=False):
+        att_raw = torch.mm(h_all, self.attention_map[:,None])
+        att = F.softmax(att_raw.squeeze())
+
+        if return_weights:
+            return att
+        else:
+            return torch.mm(att[None,:], h_all).squeeze()
+
+    def _run_regression(self, h_last):
         for i, linear_map in enumerate(self.linear_maps):
             if i:
                 h_last = self._regression_nonlinearity(h_last)
 
             h_last = linear_map(h_last)
             
-        y_hat = self._postprocess_outputs(h_last)
-
-        return y_hat
-
+        return h_last 
+    
     def _regression_nonlinearity(self, x):
         return F.tanh(x)
     
@@ -264,9 +292,66 @@ class RNNRegression(torch.nn.Module):
 
     
     def word_embeddings(self, words=[]):
+        """Extract the tuned word embeddings
+
+        If an empty list is passed, all word embeddings are returned
+
+        Parameters
+        ----------
+        words : list(str)
+            The words to get the embeddings for
+        
+        Returns
+        -------
+        pandas.DataFrame
+        """        
+        words = words if words else self.vocab
         embeddings = self._get_inputs(words).data.cpu().numpy()
-        return pd.DataFrame(embeddings, index=self.vocab)
+        
+        return pd.DataFrame(embeddings, index=words)
     
+    def attention_weights(self, structures):
+        """Compute what the LSTM regression is attending to
+
+        The weights that are returned are only for the structures used
+        in the last LSTM. This is because that is the only place that
+        attention is implemented - i.e. right befoe passing the LSTM
+        outputs to a regression layer.
+
+        Parameters
+        ----------
+        structures : iterable(iterable(object))
+            a matrix of structures (independent variables) with rows
+            corresponding to a particular kind of RNN
+
+        Returns
+        -------
+        pytorch.Variable
+        """        
+        try:
+            assert self.attention
+        except AttributeError:
+            raise AttributeError('attention not used')
+        
+        try:
+            words = structures[0].words()
+        except AttributeError:
+            assert all([isinstance(w, str)
+                        for w in structures[0]])
+            words = structures[0]
+        except AssertionError:
+            msg = "first structure in sequence must either"+\
+                  "implement a words() method or itself be"+\
+                  "a sequence of words"
+            raise ValueError(msg)
+        
+        inputs = self._get_inputs(words)
+        inputs = self._preprocess_inputs(inputs)
+        
+        h_all, h_last = self._run_rnns(inputs, structures)
+        
+        return self._run_attention(h_all, return_weights=True)
+
     
 class RNNRegressionTrainer(object):
 
@@ -422,3 +507,54 @@ class RNNRegressionTrainer(object):
             print(str(i)+'\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
                   ' \t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
                   ' \t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
+
+    def predict(self, X):
+        """Predict using the LSTM regression
+
+        Parameters
+        ----------
+        X : iterable(iterable(object))
+            a matrix of structures (independent variables) with rows
+            corresponding to a particular kind of RNN
+        """
+
+        predictions = [self._regression(struct) for struct in zip(*X)]
+
+        if self._continuous:
+            return np.array([p.data.cpu().numpy() for p in predictions])
+        else:
+            dist = np.array([p.data.cpu().numpy() for p in predictions])
+            return np.where(dist==np.max(dist, axis=1)[:,None])
+
+    def attention_weights(self, X):
+        """Compute what the LSTM regression is attending to
+
+        Parameters
+        ----------
+        X : iterable(iterable(object))
+            a matrix of structures (independent variables) with rows
+            corresponding to a particular kind of RNN
+
+        Returns
+        -------
+        list(np.array)
+        """        
+        attention = [self._regression.attention_weights(struct)
+                     for struct in zip(*X)]
+        return [a.data.cpu().numpy() for a in attention]
+
+    def word_embeddings(self, words=[]):
+        """Extract the tuned word embeddings
+
+        If an empty list is passed, all word embeddings are returned
+
+        Parameters
+        ----------
+        words : list(str)
+            The words to get the embeddings for
+        
+        Returns
+        -------
+        pandas.DataFrame
+        """        
+        return self._regression.word_embeddings(words)
