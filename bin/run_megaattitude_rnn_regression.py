@@ -74,20 +74,25 @@ vocab = list({word
 # load the glove embedding
 embeddings = load_glove_embedding('../../../embeddings/glove/glove.42B.300d', vocab)
 
+
 # train the model
 trainer = RNNRegressionTrainer(embeddings=embeddings, gpu=True,
                                rnn_classes=ChildSumConstituencyTreeLSTM,
+                               bidirectional=True, attention=True,
                                regression_type=args.regressiontype,
                                rnn_hidden_sizes=300, num_rnn_layers=1,
-                               regression_hidden_sizes=(150,75))
+                               regression_hidden_sizes=(150,))
 trainer.fit(X=[[structures[c] for c in data.condition.values]],
             Y=data.response.values,
-            lr=1., batch_size=100)
+            lr=1e-2, batch_size=10,
+            verbosity=10)
 
 # trainer = RNNRegressionTrainer(embeddings=embeddings, gpu=True,
 #                                rnn_classes=[LSTM, ChildSumConstituencyTreeLSTM],
-#                                rnn_hidden_sizes=300)    
-# trainer.fit(structures=[[structures[c].words() for c in data.condition.values],
-#                         [structures[c] for c in data.condition.values]],
-#             targets=data.response.values,
-#             lr=1., batch_size=100)
+#                                regression_type=args.regressiontype,
+#                                rnn_hidden_sizes=300, num_rnn_layers=1,
+#                                regression_hidden_sizes=(150,))
+# trainer.fit(X=[[structures[c].words() for c in data.condition.values],
+#                [structures[c] for c in data.condition.values]],
+#             Y=data.response.values,
+#             lr=1., batch_size=1000)
