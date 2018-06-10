@@ -249,7 +249,7 @@ class RNNRegression(torch.nn.Module):
 
     def _run_attention(self, h_all, return_weights=False):
         att_raw = torch.mm(h_all, self.attention_map[:,None])
-        att = F.softmax(att_raw.squeeze())
+        att = F.softmax(att_raw.squeeze(), dim=0)  
 
         if return_weights:
             return att
