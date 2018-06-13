@@ -38,11 +38,11 @@ class DependencyTree(nltk.Tree):
     def words(self):
         return [i.label() for i in self.subtrees()] + self.leaves()
 
-    def word_idx(self, idx):
+    def word_index(self, idx):
         '''input: tree index ex: (), (1,)
            returns: word index in sequence
         '''
         if isinstance(self[idx], str):
             return self.words().index(self[idx])
         else:
-            return self.words().index(self[idx].labesl())
+            return self.words().index(self[idx].label())
