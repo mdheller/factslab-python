@@ -364,12 +364,14 @@ class RNNRegressionTrainer(object):
                          "multinomial": CrossEntropyLoss}
 
     def __init__(self, regression_type="linear",
-                 optimizer_class=torch.optim.Adam, device="cpu", **kwargs):
+                 optimizer_class=torch.optim.Adam, device="cpu", epochs=1,
+                 **kwargs):
         self._regression_type = regression_type
         self._optimizer_class = optimizer_class
         self._init_kwargs = kwargs
         self._continuous = regression_type != "multinomial"
         self.device = device
+        self.epochs = epochs
 
     def _initialize_trainer_regression(self):
         if self._continuous:
@@ -417,10 +419,12 @@ class RNNRegressionTrainer(object):
 
         loss_trace = []
         targ_trace = []
-        print("PROGRESS" + "\t METRICS")
-        while True:
+        epoch = 0
+        while epoch < self.epochs:
+            epoch += 1
             losses = []
-
+            print("EPOCH:", epoch, "\n")
+            print("BATCH" + "\t METRICS")
             shuffle(structures_targets)
             part = partition(structures_targets, batch_size)
 
@@ -469,7 +473,7 @@ class RNNRegressionTrainer(object):
                 targ_var = np.mean(np.square(np.array(targ_trace) - np.mean(self._Y)))
                 r2 = 1. - (resid_mean / targ_var)
 
-                print(str(i) + '\t residual variance:\t', np.round(resid_mean, sigdig), '\n',
+                print(str(i + 1) + '\t residual variance:\t', np.round(resid_mean, sigdig), '\n',
                       ' \t total variance:\t', np.round(targ_var, sigdig), '\n',
                       ' \t r-squared:\t\t', np.round(r2, sigdig), '\n')
 
@@ -478,7 +482,7 @@ class RNNRegressionTrainer(object):
                 mae = np.mean(ae)
                 pmae = 1. - (resid_mean / mae)
 
-                print(str(i) + '\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
+                print(str(i + 1) + '\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
                       ' \t total absolute error:\t\t', np.round(mae, sigdig), '\n',
                       ' \t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
 
@@ -487,7 +491,7 @@ class RNNRegressionTrainer(object):
                 mae = np.mean(ae)
                 pmae = 1. - (resid_mean / mae)
 
-                print(str(i) + '\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
+                print(str(i + 1) + '\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
                       ' \t total absolute error:\t\t', np.round(mae, sigdig), '\n',
                       ' \t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
 
@@ -496,7 +500,7 @@ class RNNRegressionTrainer(object):
             targ_mean_neglogprob = -np.mean(self._Y_logprob[targ_trace])
             pnlp = 1. - (model_mean_neglogprob / targ_mean_neglogprob)
 
-            print(str(i) + '\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
+            print(str(i + 1) + '\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
                   ' \t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
                   ' \t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
 

@@ -87,7 +87,7 @@ trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                bidirectional=True, attention=False,
                                regression_type="multinomial",
                                rnn_hidden_sizes=300, num_rnn_layers=1,
-                               regression_hidden_sizes=(150,))
+                               regression_hidden_sizes=(150,), epochs=1)
 
 
 x = [[x for x in structures]]
