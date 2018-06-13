@@ -1,7 +1,6 @@
 import os
 import numpy as np
 import pandas as pd
-
 from zipfile import ZipFile
 
 
@@ -19,7 +18,6 @@ def load_glove_embedding(fpath, vocab):
     zipname = os.path.split(fpath)[-1]
     size, dim = zipname.split('.')[1:3]
     fpathout = 'glove.' + size + '.' + dim + '.filtered.txt'
-
     if fpathout in os.listdir(os.getcwd()):
         embedding = pd.read_csv(fpathout, index_col=0, header=None, sep=' ')
 
@@ -36,9 +34,7 @@ def load_glove_embedding(fpath, vocab):
         mean_emb = list(embedding.mean(axis=0).values)
         oov = [w for w in vocab if w not in embedding.index.values]
         oov = pd.DataFrame(np.tile(mean_emb, [len(oov), 1]), index=oov)
-
         embedding = pd.concat([embedding, oov], axis=0)
-
         embedding.to_csv(fpathout, sep=' ', header=False)
 
     return embedding

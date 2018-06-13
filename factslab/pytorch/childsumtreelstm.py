@@ -4,7 +4,6 @@ import torch.nn.functional as F
 
 from abc import ABCMeta, abstractmethod
 from factslab.datastructures import ConstituencyTree
-from torch.autograd import Variable
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.rnn import RNNBase
 
@@ -230,16 +229,12 @@ class ChildSumTreeLSTM(RNNBase):
             c_prev = torch.stack(c_prev, 1)
 
         elif inputs.is_cuda:
-            h_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False).cuda()
-            c_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False).cuda()
+            h_prev = torch.zeros(self.hidden_size, 1).cuda()
+            c_prev = torch.zeros(self.hidden_size, 1).cuda()
 
         else:
-            h_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False)
-            c_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False)
+            h_prev = torch.zeros(self.hidden_size, 1)
+            c_prev = torch.zeros(self.hidden_size, 1)
 
         return oidx, (h_prev, c_prev)
 
@@ -314,11 +309,9 @@ class ChildSumConstituencyTreeLSTM(ChildSumTreeLSTM):
                     x_t_raw = torch.zeros(self.input_size)
 
                 if inputs.is_cuda:
-                    x_t = Variable(x_t_raw,
-                                   requires_grad=False).cuda()
+                    x_t = x_t_raw.cuda()
 
                 else:
-                    x_t = Variable(x_t_raw,
-                                   requires_grad=False)
+                    x_t = x_t_raw
 
         return x_t

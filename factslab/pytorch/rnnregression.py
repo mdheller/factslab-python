@@ -3,7 +3,6 @@ import pandas as pd
 import torch
 import torch.autograd
 import torch.nn.functional as F
-from torch.autograd import Variable
 from torch.nn import Parameter
 from torch.nn import LSTM
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
@@ -73,11 +72,11 @@ class RNNRegression(torch.nn.Module):
     def __init__(self, embeddings=None, embedding_size=None, vocab=None,
                  rnn_classes=LSTM, rnn_hidden_sizes=300,
                  num_rnn_layers=1, bidirectional=False, attention=False,
-                 regression_hidden_sizes=[], output_size=1, gpu=False):
+                 regression_hidden_sizes=[], output_size=1, device="cpu"):
         super().__init__()
 
         # set hardware parameters
-        self.gpu = gpu
+        self.device = device
 
         # initialize model
         self._initialize_embeddings(embeddings, vocab)
@@ -171,7 +170,7 @@ class RNNRegression(torch.nn.Module):
                             hidden_size=hsize,
                             num_layers=lnum,
                             bidirectional=bi)
-            rnn = rnn.cuda() if self.gpu else rnn
+            rnn = rnn.to(self.device)
             self.rnns.append(rnn)
             output_size = hsize * 2 if bi else hsize
 
@@ -189,12 +188,12 @@ class RNNRegression(torch.nn.Module):
                                           requires_grad=True)
         for h in hidden_sizes:
             linmap = torch.nn.Linear(last_size, h)
-            linmap = linmap.cuda() if self.gpu else linmap
+            linmap = linmap.to(self.device)
             self.linear_maps.append(linmap)
             last_size = h
 
         linmap = torch.nn.Linear(last_size, output_size)
-        linmap = linmap.cuda() if self.gpu else linmap
+        linmap = linmap.to(self.device)
         self.linear_maps.append(linmap)
 
     def forward(self, structures):
@@ -291,11 +290,9 @@ class RNNRegression(torch.nn.Module):
 
     def _get_inputs(self, words):
         indices = [[self.vocab_hash[w]] for w in words]
-        indices = torch.LongTensor(indices)
-        indices = indices.cuda() if self.gpu else indices
-        indices = Variable(indices)
-
-        return self.embeddings(indices).squeeze()
+        indices = torch.tensor(indices, dtype=torch.long)
+        indices = indices.to(self.device)
+        return self.embeddings(indices.detach()).squeeze()
 
     def word_embeddings(self, words=[]):
         """Extract the tuned word embeddings
@@ -367,29 +364,27 @@ class RNNRegressionTrainer(object):
                          "multinomial": CrossEntropyLoss}
 
     def __init__(self, regression_type="linear",
-                 optimizer_class=torch.optim.Adam, gpu=False, **kwargs):
+                 optimizer_class=torch.optim.Adam, device="cpu", **kwargs):
         self._regression_type = regression_type
         self._optimizer_class = optimizer_class
         self._init_kwargs = kwargs
         self._continuous = regression_type != "multinomial"
-        self.gpu = gpu
+        self.device = device
 
     def _initialize_trainer_regression(self):
         if self._continuous:
-            self._regression = RNNRegression(gpu=self.gpu,
+            self._regression = RNNRegression(device=self.device,
                                              **self._init_kwargs)
         else:
             output_size = np.unique(self._Y).shape[0]
             self._regression = RNNRegression(output_size=output_size,
-                                             gpu=self.gpu,
+                                             device=self.device,
                                              **self._init_kwargs)
 
         lf_class = self.__class__.loss_function_map[self._regression_type]
         self._loss_function = lf_class()
-
-        if self.gpu:
-            self._regression = self._regression.cuda()
-            self._loss_function = self._loss_function.cuda()
+        self._regression = self._regression.to(self.device)
+        self._loss_function = self._loss_function.to(self.device)
 
     def fit(self, X, Y, batch_size=100, verbosity=1, **kwargs):
         """Fit the LSTM regression
@@ -432,16 +427,14 @@ class RNNRegressionTrainer(object):
             for i, structs_targs_batch in enumerate(part):
 
                 optimizer.zero_grad()
-
                 for struct, targ in structs_targs_batch:
                     targ_trace.append(targ)
                     if self._continuous:
-                        targ = torch.FloatTensor([float(targ)])
+                        targ = torch.tensor([targ], dtype=torch.float,
+                                            device=self.device)
                     else:
-                        targ = torch.LongTensor([int(targ)])
-
-                    targ = targ.cuda() if self.gpu else targ
-                    targ = Variable(targ, requires_grad=False)
+                        targ = torch.tensor([int(targ)], dtype=torch.long,
+                                            device=self.device)
 
                     predicted = self._regression(struct)
 
@@ -452,16 +445,14 @@ class RNNRegressionTrainer(object):
 
                     losses.append(loss)
                 loss = sum(losses) / float(batch_size)
-                # print(loss)
                 loss.backward()
 
                 optimizer.step()
                 losses = []
+                loss_trace.append(loss.item())
 
-                loss_trace.append(loss.data[0])
-                # pdb.set_trace()
                 # TODO: generalize for non-linear regression
-                if verbosity and i:
+                if verbosity:
                     if not i % verbosity:
                         self._print_metric(i, loss_trace, targ_trace)
                         loss_trace = []

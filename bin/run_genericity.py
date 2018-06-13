@@ -11,7 +11,11 @@ from factslab.pytorch.childsumtreelstm import ChildSumDependencyTreeLSTM
 from factslab.pytorch.rnnregression import RNNRegressionTrainer
 from nltk import DependencyGraph
 from random import randint
+from torch.cuda import is_available
+from torch import device
 import pdb
+
+
 # initialize argument parser
 description = 'Run an RNN regression on Genericity protocol annotation.'
 parser = argparse.ArgumentParser(description=description)
@@ -55,37 +59,37 @@ files = ['/UD_English-r1.2/trees-train.tsv',
 home = expanduser("~/Downloads/")
 
 structures = []
+structs_sents = []
 for file in files:
     path = home + file
     with open(path, 'r') as f:
-        structs_sents = [line.strip().split('\t') for line in f]
-
+        structs_sents += [line.strip().split('\t') for line in f]
 vocab = []
+ids = [a[0] for a in structs_sents]
 # Create dependency tree structure and find vocab from sentence
-for elem in structs_sents:
-    # struct_id.append(elem[0])
+for x in data['sent_id'].values:
+    elem = structs_sents[ids.index(x)]
     structures.append(DependencyTree.fromstring(elem[1]))
     structures[-1].sentence = elem[2].split()
+    structures[-1].tokens = list(set(data[data['sent_id'] == elem[0]]['noun_token'].values))
     vocab.append(elem[2].split())
-
 vocab = list(set(sum(vocab, [])))
-# pdb.set_trace()
-# load the glove embedding
-embeddings = load_glove_embedding('../../../../Downloads/glove.42B.300d',
-                                  vocab)
 
+# load the glove embedding
+embeddings = load_glove_embedding('../../../../Downloads/embeddings/glove.42B.300d', vocab)
+
+# pyTorch figures out device to do computation on
+device_to_use = device("cuda:0" if is_available() else "cpu")
 
 # train the model
-trainer = RNNRegressionTrainer(embeddings=embeddings, gpu=False,
+trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                rnn_classes=ChildSumDependencyTreeLSTM,
                                bidirectional=True, attention=False,
-                               regression_type=args.regressiontype,
+                               regression_type="multinomial",
                                rnn_hidden_sizes=300, num_rnn_layers=1,
-                               regression_hidden_sizes=(1,))
-# x = [[x.split() for x in list(data['raw_sentence'])]]
+                               regression_hidden_sizes=(150,))
+
+
 x = [[x for x in structures]]
-# y = list(data['part'].values)
-y = [randint(0, 1) for _ in range(len(structures))]
-# y = []
-# pdb.set_trace()
+y = data['part'].values.tolist()
 trainer.fit(X=x, Y=y, lr=1e-2, batch_size=100, verbosity=1)
