@@ -7,7 +7,7 @@ from torch.nn import Parameter
 from torch.nn import LSTM
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
 from scipy.special import huber
-
+import pdb
 from random import shuffle
 from collections import Iterable
 from factslab.utility import partition
@@ -63,14 +63,15 @@ class RNNRegression(torch.nn.Module):
         the size of the hidden states in each layer of a
         multilayer regression, going from input (RNN hidden state)
         to output
-    device : str
-        cpu or gpu
+    device : torch.device
+        device(type="cpu") or device(type="cuda:0")
     """
 
     def __init__(self, embeddings=None, embedding_size=None, vocab=None,
                  rnn_classes=LSTM, rnn_hidden_sizes=300,
                  num_rnn_layers=1, bidirectional=False, attention=False,
-                 regression_hidden_sizes=[], output_size=1, device="cpu"):
+                 regression_hidden_sizes=[], output_size=1,
+                 device=torch.device(type="cpu")):
         super().__init__()
 
         # set hardware parameters
@@ -180,8 +181,7 @@ class RNNRegression(torch.nn.Module):
         self.attention = attention
 
         if attention:
-            self.attention_map = Parameter(torch.zeros(last_size),
-                                          requires_grad=True)
+            self.attention_map = Parameter(torch.zeros(last_size))
 
         for h in hidden_sizes:
             linmap = torch.nn.Linear(last_size, h)
@@ -237,9 +237,10 @@ class RNNRegression(torch.nn.Module):
         for rnn, structure in zip(self.rnns, structures):
             if isinstance(rnn, ChildSumTreeLSTM):
                 h_all, h_last = rnn(inputs, structure)
-            else:
-                h_all, h_last = rnn(inputs[:, None, :])
-
+            elif isinstance(rnn, LSTM):
+                h_last, (h_all, c_all) = rnn(inputs[:, None, :])
+            elif isinstance(rnn, GRU):
+                h_last, h_all = rnn(inputs[:, None, :])
             inputs = h_all.squeeze()
 
         return h_all, h_last
@@ -268,8 +269,8 @@ class RNNRegression(torch.nn.Module):
     def _preprocess_inputs(self, inputs):
         """Apply some function(s) to the input embeddings
 
-        This is included to allow for an easy preprocessing hook for 
-        RNNRegression subclasses. For instance, we might want to 
+        This is included to allow for an easy preprocessing hook for
+        RNNRegression subclasses. For instance, we might want to
         apply a tanh to the inputs to make them look more like features
         """
         return inputs
@@ -354,8 +355,8 @@ class RNNRegressionTrainer(object):
                          "multinomial": CrossEntropyLoss}
 
     def __init__(self, regression_type="linear",
-                 optimizer_class=torch.optim.Adam, device="cpu", epochs=10,
-                 **kwargs):
+                 optimizer_class=torch.optim.Adam,
+                 device=torch.device(type="cpu"), epochs=10, **kwargs):
         self._regression_type = regression_type
         self._optimizer_class = optimizer_class
         self.epochs = epochs
@@ -429,12 +430,11 @@ class RNNRegressionTrainer(object):
                     targ_trace.append(targ)
 
                     if self._continuous:
-                        targ = torch.tensor([targ], dtype=torch.float,
-                                            device=self.device)
+                        targ = torch.tensor([targ], dtype=torch.float)
                     else:
-                        targ = torch.tensor([int(targ)], dtype=torch.long,
-                                            device=self.device)
+                        targ = torch.tensor([int(targ)], dtype=torch.long)
 
+                    targ = targ.to(self.device)
                     predicted = self._regression(struct)
                     # predicted = predicted.expand_as(targ)
 

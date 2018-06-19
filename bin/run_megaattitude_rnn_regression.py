@@ -1,7 +1,7 @@
 import argparse
 import numpy as np
 import pandas as pd
-
+import pdb
 from torch.nn import LSTM, SmoothL1Loss, L1Loss, CrossEntropyLoss
 from torch.cuda import is_available
 from torch import device
@@ -82,26 +82,16 @@ vocab = list({word
 embeddings = load_glove_embedding(args.emb_path, vocab)
 
 device_to_use = device("cuda:0" if is_available() else "cpu")
-
+# pdb.set_trace()
 # train the model
 trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                rnn_classes=ChildSumConstituencyTreeLSTM,
                                bidirectional=True, attention=True,
                                regression_type=args.regressiontype,
                                rnn_hidden_sizes=300, num_rnn_layers=1,
-                               regression_hidden_sizes=(150,), 
+                               regression_hidden_sizes=(150,),
                                epochs=args.epochs)
 trainer.fit(X=[[structures[c] for c in data.condition.values]],
             Y=data.response.values,
             lr=1e-2, batch_size=100,
             verbosity=1)
-
-# trainer = RNNRegressionTrainer(embeddings=embeddings, gpu=True,
-#                                rnn_classes=[LSTM, ChildSumConstituencyTreeLSTM],
-#                                regression_type=args.regressiontype,
-#                                rnn_hidden_sizes=300, num_rnn_layers=1,
-#                                regression_hidden_sizes=(150,))
-# trainer.fit(X=[[structures[c].words() for c in data.condition.values],
-#                [structures[c] for c in data.condition.values]],
-#             Y=data.response.values,
-#             lr=1., batch_size=1000)
