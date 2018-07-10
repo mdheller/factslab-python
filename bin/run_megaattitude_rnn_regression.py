@@ -2,13 +2,14 @@ import argparse
 import numpy as np
 import pandas as pd
 import pdb
-from torch.nn import LSTM, SmoothL1Loss, L1Loss, CrossEntropyLoss
+from torch.nn import LSTM
 from torch.cuda import is_available
 from torch import device
 from factslab.utility import load_glove_embedding
 from factslab.datastructures import ConstituencyTree
 from factslab.pytorch.childsumtreelstm import ChildSumConstituencyTreeLSTM
 from factslab.pytorch.rnnregression import RNNRegressionTrainer
+import sys
 
 # initialize argument parser
 description = 'Run an RNN regression on MegaAttitude.'
@@ -21,7 +22,7 @@ parser.add_argument('--data',
 parser.add_argument('--structures',
                     type=str,
                     default='../../factslab-data/megaattitude/structures.tsv')
-parser.add_argument('--emb_path',
+parser.add_argument('--embeddings',
                     type=str,
                     default='../../../embeddings/glove/glove.42B.300d')
 parser.add_argument('--regressiontype',
@@ -29,7 +30,19 @@ parser.add_argument('--regressiontype',
                     default="linear")
 parser.add_argument('--epochs',
                     type=int,
-                    default=10)
+                    default=1)
+parser.add_argument('--batch',
+                    type=int,
+                    default=128)
+parser.add_argument('--rnntype',
+                    type=str,
+                    default="tree")
+parser.add_argument('--verbosity',
+                    type=int,
+                    default="1")
+parser.add_argument('--attention',
+                    type=bool,
+                    default=False)
 
 # parse arguments
 args = parser.parse_args()
@@ -79,19 +92,31 @@ vocab = list({word
               for word in tree.leaves()})
 
 # load the glove embedding
-embeddings = load_glove_embedding(args.emb_path, vocab)
-
+embeddings = load_glove_embedding(args.embeddings, vocab)
 device_to_use = device("cuda:0" if is_available() else "cpu")
-# pdb.set_trace()
+
+if args.rnntype == "tree":
+    x_raw = [structures[c] for c in data.condition.values]
+    x = [x_raw[i:i + args.batch] for i in range(0, len(x_raw), args.batch)]
+    y_raw = data.response.values
+    y = [y_raw[i:i + args.batch] for i in range(0, len(y_raw), args.batch)]
+    rnntype = ChildSumConstituencyTreeLSTM
+elif args.rnntype == "linear":
+    # Implmenent mini-batching
+    x_raw = [structures[c].words() for c in data.condition.values]
+    x = [x_raw[i:i + args.batch] for i in range(0, len(x_raw), args.batch)]
+    y_raw = data.response.values
+    y = [y_raw[i:i + args.batch] for i in range(0, len(y_raw), args.batch)]
+    rnntype = LSTM
+else:
+    sys.exit('Error. Argument rnntype must be tree or linear')
+
 # train the model
 trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
-                               rnn_classes=ChildSumConstituencyTreeLSTM,
-                               bidirectional=True, attention=True,
+                               rnn_classes=rnntype, bidirectional=True,
+                               attention=args.attention, epochs=args.epochs,
                                regression_type=args.regressiontype,
                                rnn_hidden_sizes=300, num_rnn_layers=1,
-                               regression_hidden_sizes=(150,),
-                               epochs=args.epochs)
-trainer.fit(X=[[structures[c] for c in data.condition.values]],
-            Y=data.response.values,
-            lr=1e-2, batch_size=100,
-            verbosity=1)
+                               regression_hidden_sizes=(150,))
+
+trainer.fit(X=x, Y=y, lr=1e-2, batch_size=args.batch, verbosity=args.verbosity)
