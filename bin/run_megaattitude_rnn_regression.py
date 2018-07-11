@@ -41,8 +41,8 @@ parser.add_argument('--verbosity',
                     type=int,
                     default="1")
 parser.add_argument('--attention',
-                    type=bool,
-                    default=False)
+                    action='store_true',
+                    help='Turn attention on or off')
 
 # parse arguments
 args = parser.parse_args()
@@ -101,6 +101,7 @@ if args.rnntype == "tree":
     y_raw = data.response.values
     y = [y_raw[i:i + args.batch] for i in range(0, len(y_raw), args.batch)]
     rnntype = ChildSumConstituencyTreeLSTM
+    args.batch = 1
 elif args.rnntype == "linear":
     # Implmenent mini-batching
     x_raw = [structures[c].words() for c in data.condition.values]
@@ -108,6 +109,10 @@ elif args.rnntype == "linear":
     y_raw = data.response.values
     y = [y_raw[i:i + args.batch] for i in range(0, len(y_raw), args.batch)]
     rnntype = LSTM
+    # Take care of the fact that the last batch doesn't have size 128. This
+    # casues problems in attention
+    x[-1] = x[-1] + x[-2][0:len(x[-2]) - len(x[-1])]
+    y[-1] = np.append(y[-1], y[-2][0:len(y[-2]) - len(y[-1])])
 else:
     sys.exit('Error. Argument rnntype must be tree or linear')
 
@@ -117,6 +122,7 @@ trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                attention=args.attention, epochs=args.epochs,
                                regression_type=args.regressiontype,
                                rnn_hidden_sizes=300, num_rnn_layers=1,
-                               regression_hidden_sizes=(150,))
+                               regression_hidden_sizes=(150,),
+                               batch_size=args.batch)
 
-trainer.fit(X=x, Y=y, lr=1e-2, batch_size=args.batch, verbosity=args.verbosity)
+trainer.fit(X=x, Y=y, lr=1e-2, verbosity=args.verbosity)

@@ -74,12 +74,11 @@ class RNNRegression(torch.nn.Module):
                  rnn_classes=LSTM, rnn_hidden_sizes=300,
                  num_rnn_layers=1, bidirectional=False, attention=False,
                  regression_hidden_sizes=[], output_size=1,
-                 device=torch.device(type="cpu")):
+                 device=torch.device(type="cpu"), batch_size=128):
         super().__init__()
 
-        # set hardware parameters
         self.device = device
-
+        self.batch_size = batch_size
         # initialize model
         self._initialize_embeddings(embeddings, vocab)
         self._initialize_rnn(rnn_classes, rnn_hidden_sizes,
@@ -176,7 +175,7 @@ class RNNRegression(torch.nn.Module):
             output_size = hsize * 2 if bi else hsize
 
         self.rnn_output_size = output_size
-        if LSTM in self.rnn_classes:
+        if self.batch_size > 1:
             self.has_batch_dim = True
         else:
             self.has_batch_dim = False
@@ -188,8 +187,12 @@ class RNNRegression(torch.nn.Module):
 
         self.attention = attention
 
-        if attention:
-            self.attention_map = Parameter(torch.zeros(last_size))
+        if self.attention:
+            if self.has_batch_dim:
+                self.attention_map = Parameter(torch.zeros(self.batch_size,
+                                                           last_size))
+            else:
+                self.attention_map = Parameter(torch.zeros(last_size))
 
         for h in hidden_sizes:
             linmap = torch.nn.Linear(last_size, h)
@@ -222,7 +225,6 @@ class RNNRegression(torch.nn.Module):
         try:
             words = structures.words()
         except AttributeError:
-            # pdb.set_trace()
             # assert all([isinstance(w, str) for w in structures])
             words = structures
         except AssertionError:
@@ -238,19 +240,19 @@ class RNNRegression(torch.nn.Module):
         if self.attention:
             h_last = self._run_attention(h_all)
         else:
-            if isinstance(self.rnns[0], ChildSumTreeLSTM):
-                None
-            else:
-                h_last = h_all
-
+            if self.has_batch_dim:
+                h_last = self.last_timestep(h_all, lengths)
         h_last = self._run_regression(h_last)
 
-        y_hat = self._postprocess_outputs(h_last, lengths)
+        y_hat = self._postprocess_outputs(h_last)
 
         return y_hat, targets
 
     def _run_rnns(self, inputs, structures, lengths):
-        for rnn, structure in zip(self.rnns, structures):
+        '''
+            Run desired rnns
+        '''
+        for rnn, structure in zip(self.rnns, [structures]):
             if isinstance(rnn, ChildSumTreeLSTM):
                 h_all, h_last = rnn(inputs, structure)
             elif isinstance(rnn, LSTM):
@@ -258,27 +260,36 @@ class RNNRegression(torch.nn.Module):
                 h_all, (h_last, c_last) = rnn(packed)
                 h_all, _ = pad_packed_sequence(h_all, batch_first=True)
             elif isinstance(rnn, GRU):
-                h_all, h_last = rnn(inputs[:, None, :])
+                packed = pack_padded_sequence(inputs, list(lengths.data), batch_first=True)
+                h_all, h_last = rnn(packed)
+                h_all, _ = pad_packed_sequence(h_all, batch_first=True)
             inputs = h_all.squeeze()
 
         return h_all, h_last
 
     def _run_attention(self, h_all, return_weights=False):
-        att_raw = torch.mm(h_all, self.attention_map[:, None])
-        att = F.softmax(att_raw.squeeze(), dim=0)
+        if not self.has_batch_dim:
+            att_raw = torch.mm(h_all, self.attention_map[:, None])
+            att = F.softmax(att_raw.squeeze(), dim=0)
 
-        if return_weights:
-            return att
+            if return_weights:
+                return att
+            else:
+                return torch.mm(att[None, :], h_all).squeeze()
         else:
-            return torch.mm(att[None, :], h_all).squeeze()
+            att_raw = torch.bmm(h_all, self.attention_map[:, :, None])
+            att = F.softmax(att_raw.squeeze(), dim=0)
+
+            if return_weights:
+                return att
+            else:
+                return torch.bmm(att[:, None, :], h_all).squeeze()
 
     def _run_regression(self, h_last):
         for i, linear_map in enumerate(self.linear_maps):
             if i:
                 h_last = self._regression_nonlinearity(h_last)
-
             h_last = linear_map(h_last)
-
         return h_last
 
     def _regression_nonlinearity(self, x):
@@ -313,12 +324,9 @@ class RNNRegression(torch.nn.Module):
 
         return sorted_data, sorted_targets, sorted_seq_len
 
-    def _postprocess_outputs(self, outputs, lengths):
+    def _postprocess_outputs(self, outputs):
         """Apply some function(s) to the output value(s)"""
-        if self.has_batch_dim:
-            return self.last_timestep(outputs, lengths)
-        else:
-            return outputs.squeeze()
+        return outputs.squeeze()
 
     def last_timestep(self, unpacked, lengths):
         # Index of the last output for each sequence
@@ -486,7 +494,7 @@ class RNNRegressionTrainer(object):
                 optimizer.zero_grad()
                 if self.rnn_classes == LSTM:
                     structs, targs = structs_targs_batch
-                    # pdb.set_trace()
+
                     targ_trace += list(targs)
 
                     if self._continuous:
