@@ -197,7 +197,7 @@ class ChildSumTreeLSTM(RNNBase):
             bihattrname = 'bias_ih_l{}{}'.format(str(layer), dirtag)
 
             bih, bhh = getattr(self, bihattrname), getattr(self, bhhattrname)
-
+            # pdb.set_trace()
             return Wih, Whh, bih, bhh
 
         else:
@@ -267,7 +267,6 @@ class ChildSumDependencyTreeLSTM(ChildSumTreeLSTM):
             word_idx = tree.word_index(idx)
             x_t = inputs[word_idx, 0]
         else:
-            # pdb.set_trace()
             word_idx = tree.word_index(idx)
             x_t = inputs[word_idx]
 

@@ -1,3 +1,4 @@
+# A script to print convert all UD conllu
 from nltk import DependencyGraph
 import re
 
@@ -17,7 +18,7 @@ files = [('en-ud-train.conllu', 'trees-train.tsv'),
 structures = []
 for file in files:
     with open(file[0], 'r') as f:
-        with open(file[1], 'w') as fout:
+        with open('structures.tsv', 'w') as fout:
             id = 0
             a = ""
             words = []
