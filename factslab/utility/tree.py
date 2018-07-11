@@ -12,13 +12,11 @@ def html_ify(s):
     return html_string
 
 
-files = [('en-ud-train.conllu', 'trees-train.tsv'),
-         ('en-ud-dev.conllu', 'trees-dev.tsv'),
-         ('en-ud-test.conllu', 'trees-test.tsv')]
+files = ['en-ud-train.conllu', 'en-ud-dev.conllu', 'en-ud-test.conllu']
 structures = []
 for file in files:
-    with open(file[0], 'r') as f:
-        with open('structures.tsv', 'w') as fout:
+    with open('structures.tsv', 'a') as fout:
+        with open(file, 'r') as f:
             id = 0
             a = ""
             words = []
@@ -32,7 +30,7 @@ for file in files:
                     structure = DependencyGraph(a, top_relation_label='root')
                     sent = " ".join(words)
                     sent = html_ify(sent)
-                    sent_id = file[0] + " sent_" + str(id)
+                    sent_id = file + " sent_" + str(id)
                     structures.append(structure)
                     a = ""
                     words = []
