@@ -33,7 +33,13 @@ def load_glove_embedding(fpath, vocab):
 
         mean_emb = list(embedding.mean(axis=0).values)
         oov = [w for w in vocab if w not in embedding.index.values]
+
+        # Add an embedding element for padding
+        PADDING_ELEMENT = ["<PAD>"]
         oov = pd.DataFrame(np.tile(mean_emb, [len(oov), 1]), index=oov)
+        pad = pd.DataFrame([np.zeros(len(mean_emb))], index=PADDING_ELEMENT)
+        oov = pd.concat([oov, pad], axis=0)
+
         embedding = pd.concat([embedding, oov], axis=0)
         embedding.to_csv(fpathout, sep=' ', header=False)
 

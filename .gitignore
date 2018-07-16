@@ -4,3 +4,5 @@
 FACTS.lab.egg-info/
 dist/
 **/__pycache__
+.ipynb_checkpoints/
+*.sbatch

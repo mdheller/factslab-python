@@ -137,9 +137,11 @@ class RNNRegression(torch.nn.Module):
             self.vocab = embeddings.index
 
         # define embedding layer
-        self.embeddings = torch.nn.Embedding(self.num_embeddings, self.embedding_size,
-                                             padding_idx=None, max_norm=None,
-                                             norm_type=2, scale_grad_by_freq=False,
+        self.embeddings = torch.nn.Embedding(self.num_embeddings,
+                                             self.embedding_size,
+                                             max_norm=None,
+                                             norm_type=2,
+                                             scale_grad_by_freq=False,
                                              sparse=False)
 
         # copy the embeddings into the embedding layer
@@ -175,10 +177,6 @@ class RNNRegression(torch.nn.Module):
             output_size = hsize * 2 if bi else hsize
 
         self.rnn_output_size = output_size
-        if self.batch_size > 1:
-            self.has_batch_dim = True
-        else:
-            self.has_batch_dim = False
 
     def _initialize_regression(self, attention, hidden_sizes, output_size):
         self.linear_maps = []
@@ -204,7 +202,7 @@ class RNNRegression(torch.nn.Module):
         linmap = linmap.to(self.device)
         self.linear_maps.append(linmap)
 
-    def forward(self, structures, targets):
+    def forward(self, structures, tokens, lengths=None):
         """
         Parameters
         ----------
@@ -232,27 +230,27 @@ class RNNRegression(torch.nn.Module):
                   "implement a words() method or itself be" +\
                   "a sequence of words"
             raise ValueError(msg)
+
         if isinstance(words[0], list):
             self.has_batch_dim = True
         else:
             self.has_batch_dim = False
-        inputs, targets, lengths = self._get_inputs(words, targets)
+
+        inputs = self._get_inputs(words)
         inputs = self._preprocess_inputs(inputs)
+
         h_all, h_last = self._run_rnns(inputs, structures, lengths)
 
         if self.attention:
             h_last = self._run_attention(h_all)
         else:
-            if self.has_batch_dim:
-                h_last = self.last_timestep(h_all, lengths)
-            else:
-                h_last = h_last.view(1, 600)
+            h_last = self.choose_timestep(h_all, tokens)
 
         h_last = self._run_regression(h_last)
 
         y_hat = self._postprocess_outputs(h_last)
 
-        return y_hat, targets
+        return y_hat
 
     def _run_rnns(self, inputs, structures, lengths):
         '''
@@ -262,7 +260,7 @@ class RNNRegression(torch.nn.Module):
             if isinstance(rnn, ChildSumTreeLSTM):
                 h_all, h_last = rnn(inputs, structure)
             elif isinstance(rnn, LSTM) and lengths is not None:
-                packed = pack_padded_sequence(inputs, lengths.data, batch_first=True)
+                packed = pack_padded_sequence(inputs, lengths, batch_first=True)
                 h_all, (h_last, c_last) = rnn(packed)
                 h_all, _ = pad_packed_sequence(h_all, batch_first=True)
             else:
@@ -314,48 +312,24 @@ class RNNRegression(torch.nn.Module):
         """
         return inputs
 
-    def _pad_inputs(self, data, targets):
-        """
-            Pad input sequences so that each minibatch has same length
-        """
-        seq_len = torch.from_numpy(np.array([len(x) for x in data]))
-        sorted_seq_len, sorted_idx = seq_len.sort(descending=True)
-        sorted_data = torch.zeros((2,), dtype=torch.long, device=self.device)
-        sorted_data = sorted_data.new_full((len(data), sorted_seq_len[0]),
-                                      fill_value=0)
-        sorted_targets = torch.zeros((2,), dtype=torch.long, device=self.device)
-        sorted_targets = sorted_targets.new_full((len(targets),), fill_value=0,
-                                         dtype=torch.float, device=self.device)
-        m = 0
-        for x in sorted_idx:
-            sorted_data[m][0:len(data[x])] = torch.tensor(data[x], dtype=torch.long)
-            sorted_targets[m] = targets[x]
-            m += 1
-
-        return sorted_data, sorted_targets, sorted_seq_len
-
     def _postprocess_outputs(self, outputs):
         """Apply some function(s) to the output value(s)"""
         return outputs.squeeze()
 
-    def last_timestep(self, unpacked, lengths):
+    def choose_timestep(self, output, idxs):
         # Index of the last output for each sequence
-        idx = (lengths - 1).view(-1, 1).expand(unpacked.size(0), unpacked.size(2)).unsqueeze(1).to(self.device)
-        return unpacked.gather(1, idx).squeeze()
+        idx = (idxs - 1).view(-1, 1).expand(output.size(0), output.size(2)).unsqueeze(1).to(self.device)
+        return output.gather(1, idx).squeeze()
 
-    def _get_inputs(self, inputs, targets):
+    def _get_inputs(self, inputs):
         if self.has_batch_dim:
             indices = []
             for sent in inputs:
                 indices.append([self.vocab_hash[word] for word in sent])
-            indices, targets, lengths = self._pad_inputs(indices, targets)
-            indices = torch.tensor(indices, dtype=torch.long, device=self.device)
-            return self.embeddings(indices).squeeze(), targets, lengths
         else:
             indices = [self.vocab_hash[word] for word in inputs]
-            indices = torch.tensor(indices, dtype=torch.long,
-                                   device=self.device)
-            return self.embeddings(indices).squeeze(), targets, None
+        indices = torch.tensor(indices, dtype=torch.long, device=self.device)
+        return self.embeddings(indices)
 
     def word_embeddings(self, words=[]):
         """Extract the tuned word embeddings
@@ -457,7 +431,7 @@ class RNNRegressionTrainer(object):
         self._regression = self._regression.to(self.device)
         self._loss_function = self._loss_function.to(self.device)
 
-    def fit(self, X, Y, batch_size=100, verbosity=1, loss_weights=None, **kwargs):
+    def fit(self, X, Y, batch_size=128, verbosity=1, loss_weights=None, tokens=None, lengths=None, **kwargs):
         """Fit the LSTM regression
 
         Parameters
@@ -485,15 +459,16 @@ class RNNRegressionTrainer(object):
 
         # each element is of the form ((struct1, struct2, ...),
         #                              target)
-        structures_targets = list(zip(self._X, self._Y, loss_weights))
+        structures_targets = list(zip(self._X, self._Y, loss_weights, tokens, lengths))
         loss_trace = []
         targ_trace = np.array([])
         epoch = 0
         while epoch < self.epochs:
             epoch += 1
-            print("Epoch:", epoch, "\n")
-            print("Progress" + "\t Metrics")
             losses = []
+            if verbosity != 0:
+                print("Epoch:", epoch)
+                print("Progress" + "\t Metrics")
 
             shuffle(structures_targets)
             total = len(self._Y)
@@ -501,8 +476,10 @@ class RNNRegressionTrainer(object):
             for i, structs_targs_batch in enumerate(structures_targets):
                 optimizer.zero_grad()
                 if self.rnn_classes == LSTM:
-                    structs, targs, loss_wts = structs_targs_batch
+                    structs, targs, loss_wts, tokens, lengths = structs_targs_batch
                     loss_wts = torch.tensor(loss_wts, dtype=torch.float, device=self.device)
+                    tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
+                    lengths = torch.tensor(lengths, dtype=torch.long, device=self.device)
                     targ_trace = np.append(targ_trace, targs)
 
                     if self._continuous:
@@ -510,16 +487,17 @@ class RNNRegressionTrainer(object):
                     else:
                         targs = torch.tensor(targs, dtype=torch.long, device=self.device)
 
-                    predicted, targs = self._regression(structs, targs)
-                    targs = torch.tensor(targs, dtype=torch.long, device=self.device)
+                    predicted = self._regression(structs, tokens, lengths)
+
                     loss = self._loss_function(predicted, targs)
                     losses.append((torch.mm(loss_wts[None, :], loss[:, None])) / len(loss))
                 else:
-                    # pdb.set_trace()
                     structs_targs = list(zip(structs_targs_batch[0],
                                              structs_targs_batch[1],
-                                             structs_targs_batch[2]))
-                    for struct, targ, loss_wt in structs_targs:
+                                             structs_targs_batch[2],
+                                             structs_targs_batch[3],
+                                             structs_targs_batch[4]))
+                    for struct, targ, loss_wt, token, length in structs_targs:
                         targ_trace = np.append(targ_trace, targ)
 
                         if self._continuous:
@@ -528,7 +506,7 @@ class RNNRegressionTrainer(object):
                             targ = torch.tensor([int(targ)], dtype=torch.long)
 
                         targ = targ.to(self.device)
-                        predicted, targ = self._regression(struct, targ)
+                        predicted = self._regression(struct, length)
                         if self._continuous:
                             loss = loss_wt * self._loss_function(predicted, targ)
                         else:
@@ -545,8 +523,8 @@ class RNNRegressionTrainer(object):
 
                 # TODO: generalize for non-linear regression
                 if verbosity:
-                    if not (i + 1) % verbosity:
-                        progress = "{:.4f}".format(((i) / total) * 100)
+                    if not ((i + 1) % verbosity):
+                        progress = "{:.4f}".format((i / total) * 100)
                         self._print_metric(progress, loss_trace, targ_trace, loss_wts)
                         loss_trace = []
                         targ_trace = np.array([])
@@ -594,7 +572,7 @@ class RNNRegressionTrainer(object):
                   ' \t\t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
                   ' \t\t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
 
-    def predict(self, X, Y):
+    def predict(self, X, tokens):
         """Predict using the LSTM regression
 
         Parameters
@@ -603,43 +581,9 @@ class RNNRegressionTrainer(object):
             a matrix of structures (independent variables) with rows
             corresponding to a particular kind of RNN
         """
+        predictions = []
+        tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
+        for x, token in zip(X, tokens):
+            predictions.append(self._regression(x, tokens=token))
 
-        predictions, targets = self._regression(X, Y)
-
-        if self._continuous:
-            return predictions, targets
-        else:
-            return predictions, targets
-
-    def attention_weights(self, X):
-        """Compute what the LSTM regression is attending to
-
-        Parameters
-        ----------
-        X : iterable(iterable(object))
-            a matrix of structures (independent variables) with rows
-            corresponding to a particular kind of RNN
-
-        Returns
-        -------
-        list(np.array)
-        """
-        attention = [self._regression.attention_weights(struct)
-                     for struct in zip(*X)]
-        return [a.data.cpu().numpy() for a in attention]
-
-    def word_embeddings(self, words=[]):
-        """Extract the tuned word embeddings
-
-        If an empty list is passed, all word embeddings are returned
-
-        Parameters
-        ----------
-        words : list(str)
-            The words to get the embeddings for
-
-        Returns
-        -------
-        pandas.DataFrame
-        """
-        return self._regression.word_embeddings(words)
+        return predictions
