@@ -166,7 +166,7 @@ class RNNRegression(torch.nn.Module):
         params_zipped = zip(self.rnn_classes, self.rnn_hidden_sizes,
                             self.num_rnn_layers, self.bidirectional)
 
-        for rnn_class, hsize, lnum, bi in params_zipped:
+        for i, (rnn_class, hsize, lnum, bi) in enumerate(params_zipped):
             input_size = output_size
             rnn = rnn_class(input_size=input_size,
                             hidden_size=hsize,
@@ -175,6 +175,8 @@ class RNNRegression(torch.nn.Module):
                             batch_first=True)
             rnn = rnn.to(self.device)
             self.rnns.append(rnn)
+            varname = '_rnn_' + str(i)
+            RNNRegression.__setattr__(self, varname, rnn)
             output_size = hsize * 2 if bi else hsize
 
         self.rnn_output_size = output_size
@@ -182,8 +184,6 @@ class RNNRegression(torch.nn.Module):
     def _initialize_regression(self, attention, hidden_sizes, output_size, attributes):
         self.attributes = attributes
         self.linear_maps = {}
-        for attr in self.attributes:
-            self.linear_maps[attr] = []
 
         self.attention = attention
 
@@ -193,17 +193,24 @@ class RNNRegression(torch.nn.Module):
                                                            last_size))
             else:
                 self.attention_map = Parameter(torch.zeros(last_size))
+        # pdb.set_trace()
         for attr in self.attributes:
+            lin_maps = []
             last_size = self.rnn_output_size
-            for h in hidden_sizes:
+            for i, h in enumerate(hidden_sizes):
                 linmap = torch.nn.Linear(last_size, h)
                 linmap = linmap.to(self.device)
-                self.linear_maps[attr].append(linmap)
+                lin_maps.append(linmap)
+                varname = '_linear_map' + attr + str(i)
+                RNNRegression.__setattr__(self, varname, linmap)
                 last_size = h
 
             linmap = torch.nn.Linear(last_size, output_size)
             linmap = linmap.to(self.device)
-            self.linear_maps[attr].append(linmap)
+            lin_maps.append(linmap)
+            varname = '_linear_map' + attr + str(len(hidden_sizes))
+            RNNRegression.__setattr__(self, varname, linmap)
+            self.linear_maps[attr] = lin_maps
 
     def forward(self, structures, tokens, lengths=None):
         """
@@ -460,8 +467,11 @@ class RNNRegressionTrainer(object):
         self._X, self._Y = X, Y
 
         self._initialize_trainer_regression()
-        # print([p.shape for p in self._regression.parameters() if p.requires_grad])
+
+        # for idx, m in enumerate(self._regression.named_parameters()):
+        #     print(idx, '->', m)
         # pdb.set_trace()
+
         optimizer = self._optimizer_class(self._regression.parameters(),
                                           **kwargs)
         self._Y_logprob = {}
@@ -489,7 +499,7 @@ class RNNRegressionTrainer(object):
             total = len(self._Y[self.attributes[0]])
 
             for i, structs_targs_batch in enumerate(structures_targets):
-                optimizer.zero_grad()
+                self._regression.zero_grad()
                 if self.rnn_classes == LSTM:
                     structs, tokens, lengths = structs_targs_batch
                     tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
@@ -538,6 +548,7 @@ class RNNRegressionTrainer(object):
                             losses[attr].append(loss)
 
                 loss = sum(losses.values())
+                # pdb.set_trace()
                 loss.backward()
 
                 optimizer.step()
