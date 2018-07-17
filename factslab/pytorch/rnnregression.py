@@ -460,7 +460,8 @@ class RNNRegressionTrainer(object):
         self._X, self._Y = X, Y
 
         self._initialize_trainer_regression()
-
+        # print([p.shape for p in self._regression.parameters() if p.requires_grad])
+        # pdb.set_trace()
         optimizer = self._optimizer_class(self._regression.parameters(),
                                           **kwargs)
         self._Y_logprob = {}
@@ -486,7 +487,7 @@ class RNNRegressionTrainer(object):
 
             shuffle(structures_targets)
             total = len(self._Y[self.attributes[0]])
-            # part = partition(structures_targets, batch_size)
+
             for i, structs_targs_batch in enumerate(structures_targets):
                 optimizer.zero_grad()
                 if self.rnn_classes == LSTM:

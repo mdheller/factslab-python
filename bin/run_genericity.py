@@ -46,6 +46,12 @@ parser.add_argument('--rnntype',
 parser.add_argument('--verbosity',
                     type=int,
                     default="10")
+parser.add_argument('--lr',
+                    type=float,
+                    default="0.05")
+parser.add_argument('--L2',
+                    type=float,
+                    default="0.01")
 parser.add_argument('--trainingtype',
                     type=str,
                     default="sep",
@@ -160,7 +166,7 @@ trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                epochs=args.epochs, batch_size=args.batch,
                                attributes=attributes)
 
-trainer.fit(X=x, Y=y, lr=1e-2, tokens=tokens, verbosity=args.verbosity, loss_weights=loss_wts, lengths=lengths)
+trainer.fit(X=x, Y=y, tokens=tokens, verbosity=args.verbosity, loss_weights=loss_wts, lengths=lengths, lr=args.lr, weight_decay=args.L2)
 # trainer._regression.load_state_dict(load('trainer.dat'))
 
 # Now to do prediction on developement dataset
@@ -211,6 +217,7 @@ for attr in attributes:
 
 for attr in attributes:
     print(attr)
+    print(conf_mat[attr])
     # Accuracy
     accuracy = sum([conf_mat[attr][i][i] for i in range(Ns)]) / np.sum(conf_mat[attr])
 
