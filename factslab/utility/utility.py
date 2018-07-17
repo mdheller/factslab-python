@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from zipfile import ZipFile
+from torch import from_numpy, sort
 
 
 def load_glove_embedding(fpath, vocab):
@@ -54,3 +55,39 @@ def partition(l, n):
             yield l[i:(i + n)]
         else:
             yield l[i:]
+
+
+def arrange_inputs(data_batch, targets_batch, wts_batch, tokens_batch, attributes):
+        """
+            Arrange input sequences so that each minibatch has same length
+        """
+        sorted_data_batch = []
+        sorted_seq_len_batch = []
+        sorted_tokens_batch = []
+        sorted_idx_batch = []
+
+        sorted_targets_batch = {}
+        sorted_wts_batch = {}
+        for attr in attributes:
+            sorted_targets_batch[attr] = []
+            sorted_wts_batch[attr] = []
+
+        for data, tokens in zip(data_batch, tokens_batch):
+            seq_len = from_numpy(np.array([len(x) for x in data]))
+            sorted_seq_len, sorted_idx = sort(seq_len, descending=True)
+            max_len = sorted_seq_len[0]
+            sorted_seq_len_batch.append(np.array(sorted_seq_len))
+            sorted_data = [data[x] + ['<PAD>' for i in range(max_len - len(data[x]))] for x in sorted_idx]
+            sorted_tokens = np.array([(tokens[x] + 1) for x in sorted_idx])
+            sorted_data_batch.append(sorted_data)
+            sorted_tokens_batch.append(sorted_tokens)
+            sorted_idx_batch.append(sorted_idx)
+
+        for attr in attributes:
+            for targets, wts, sorted_idx in zip(targets_batch[attr], wts_batch[attr], sorted_idx_batch):
+                sorted_targets = [targets[x] for x in sorted_idx]
+                sorted_wts = [wts[x] for x in sorted_idx]
+                sorted_targets_batch[attr].append(sorted_targets)
+                sorted_wts_batch[attr].append(sorted_wts)
+
+        return sorted_data_batch, sorted_targets_batch, sorted_wts_batch, sorted_seq_len_batch, sorted_tokens_batch

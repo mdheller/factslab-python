@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from os.path import expanduser
 from torch.nn import LSTM, SmoothL1Loss, L1Loss, CrossEntropyLoss
-from factslab.utility import load_glove_embedding
+from factslab.utility import load_glove_embedding, arrange_inputs
 from factslab.datastructures import ConstituencyTree
 from factslab.datastructures import DependencyTree
 from factslab.pytorch.childsumtreelstm import ChildSumDependencyTreeLSTM
@@ -21,40 +21,10 @@ from torch import load
 from statistics import mode
 # import h5py
 
-
-def _arrange_inputs(data_batch, targets_batch, wts_batch, tokens_batch):
-        """
-            Arrange input sequences so that each minibatch has same length
-        """
-        sorted_data_batch = []
-        sorted_targets_batch = []
-        sorted_seq_len_batch = []
-        sorted_wts_batch = []
-        sorted_tokens_batch = []
-        for data, targets, wts, tokens in zip(data_batch, targets_batch, wts_batch, tokens_batch):
-            seq_len = from_numpy(np.array([len(x) for x in data]))
-            sorted_seq_len, sorted_idx = sort(seq_len, descending=True)
-            max_len = sorted_seq_len[0]
-            sorted_seq_len_batch.append(np.array(sorted_seq_len))
-            sorted_data = [data[x] + ['<PAD>' for i in range(max_len - len(data[x]))] for x in sorted_idx]
-            sorted_targets = [targets[x] for x in sorted_idx]
-            sorted_wts = [wts[x] for x in sorted_idx]
-            sorted_tokens = np.array([(tokens[x] + 1) for x in sorted_idx])
-            sorted_data_batch.append(sorted_data)
-            sorted_targets_batch.append(sorted_targets)
-            sorted_wts_batch.append(sorted_wts)
-            sorted_tokens_batch.append(sorted_tokens)
-
-        return sorted_data_batch, sorted_targets_batch, sorted_wts_batch, sorted_seq_len_batch, sorted_tokens_batch
-
-
 # initialize argument parser
 description = 'Run an RNN regression on Genericity protocol annotation.'
 parser = argparse.ArgumentParser(description=description)
 
-parser.add_argument('--data',
-                    type=str,
-                    default='noun_data.tsv')
 parser.add_argument('--structures',
                     type=str,
                     default='structures.tsv')
@@ -76,27 +46,15 @@ parser.add_argument('--rnntype',
 parser.add_argument('--verbosity',
                     type=int,
                     default="10")
-parser.add_argument('--attribute',
+parser.add_argument('--trainingtype',
                     type=str,
-                    default="noun_part")
+                    default="sep",
+                    help="Train on both noun and predicate, or separately")
 
 # parse arguments
 args = parser.parse_args()
 
-# Choose the attribute based on arguments
-attribute_map = {
-                 "noun_part": ("Is.Particular", "Part.Confidence", "Noun.Token"),
-                 "noun_abs": ("Is.Abstract", "Abs.Confidence", "Noun.Token"),
-                 "noun_kind": ("Is.Kind", "Kind.Confidence", "Noun.Token"),
-                 "pred_part": ("Is.Particular", "Part.Confidence", "Pred.Token"),
-                 "pred_hyp": ("Is.Hypothetical", "Hyp.Confidence", "Pred.Token"),
-                 "pred_dyn": ("Is.Dynamic", "Dyn.Confidence", "Pred.Token")
-                }
-
-attr = attribute_map[args.attribute][0]
-attr_conf = attribute_map[args.attribute][1]
-attr_token = attribute_map[args.attribute][2]
-data = pd.read_csv(args.data, sep="\t")
+data = pd.read_csv("noun_data.tsv", sep="\t")
 
 data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data['Noun.Token'].map(lambda x: str(x))
 response = ["Is.Particular", "Is.Kind", "Is.Abstract"]
@@ -143,41 +101,52 @@ embeddings = load_glove_embedding(args.embeddings, vocab)
 
 # pyTorch figures out device to do computation on
 device_to_use = device("cuda:0" if is_available() else "cpu")
+# Split the datasets into train, dev, test
 data = data.sample(frac=1).reset_index(drop=True)
 data_dev = data_dev.sample(frac=1).reset_index(drop=True)
 data_test = data_test.sample(frac=1).reset_index(drop=True)
+# Define attributes for regression
+attributes = ["part", "kind", "abs"]
+attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
+attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
+             "abs": "Abs.Confidence"}
 
 if args.rnntype == "tree":
+    # Handle the tree input structuring here. No minibatch
+    rnntype = ChildSumDependencyTreeLSTM
     x_raw = [struct for struct in data['Structure']]
     x = [x_raw[i:i + args.batch] for i in range(0, len(x_raw), args.batch)]
     y_raw = data[attr].values
     y = [y_raw[i:i + args.batch] for i in range(0, len(y_raw), args.batch)]
     wt_raw = data[attr_conf].values
-    loss_weights = [wt_raw[i:i + args.batch] for i in range(0, len(wt_raw), args.batch)]
-    rnntype = ChildSumDependencyTreeLSTM
-    args.batch = 1
+    loss_wts = [wt_raw[i:i + args.batch] for i in range(0, len(wt_raw), args.batch)]
+
 elif args.rnntype == "linear":
-    # Implmenent mini-batching
+    # Handle linear LSTM here. Minibatch can be done
+    rnntype = LSTM
     x_raw = [struct.sentence for struct in data['Structure']]
     x = [x_raw[i:i + args.batch] for i in range(0, len(x_raw), args.batch)]
-    y_raw = data[attr].values
-    y = [y_raw[i:i + args.batch] for i in range(0, len(y_raw), args.batch)]
-    wt_raw = data[attr_conf].values
-    loss_weights = [wt_raw[i:i + args.batch] for i in range(0, len(wt_raw), args.batch)]
     tokens_raw = data["Noun.Token"].values
     tokens = [tokens_raw[i:i + args.batch] for i in range(0, len(tokens_raw), args.batch)]
-    rnntype = LSTM
-    # Take care of the fact that the last batch doesn't have size 128. This
-    # casues problems in attention
-    x[-1] = x[-1] + x[-2][0:len(x[-2]) - len(x[-1])]
-    y[-1] = np.append(y[-1], y[-2][0:len(y[-2]) - len(y[-1])])
+    y = {}
+    loss_wts = {}
+    for attr in attributes:
+        y_raw = data[attr_map[attr]].values
+        y[attr] = [y_raw[i:i + args.batch] for i in range(0, len(y_raw), args.batch)]
+        y[attr][-1] = np.append(y[attr][-1], y[attr][-2][0:len(y[attr][-2]) - len(y[attr][-1])])
+        wt_raw = data[attr_conf[attr]].values
+        loss_wts[attr] = [wt_raw[i:i + args.batch] for i in range(0, len(wt_raw), args.batch)]
+        loss_wts[attr][-1] = np.append(loss_wts[attr][-1], loss_wts[attr][-2][0:len(loss_wts[attr][-2]) - len(loss_wts[attr][-1])])
+
+    x[-1] = x[-1] + x[-2][0:len(x[-2]) - len(x[-1])]    # last batch size hack
     tokens[-1] = np.append(tokens[-1], tokens[-2][0:len(tokens[-2]) - len(tokens[-1])])
-    loss_weights[-1] = np.append(loss_weights[-1], loss_weights[-2][0:len(loss_weights[-2]) - len(loss_weights[-1])])
+
     # Arrange in descending order and pad each batch
-    x, y, loss_weights, lengths, tokens = _arrange_inputs(data_batch=x,
-                                              targets_batch=y,
-                                              wts_batch=loss_weights,
-                                              tokens_batch=tokens)
+    x, y, loss_wts, lengths, tokens = arrange_inputs(data_batch=x,
+                                                     targets_batch=y,
+                                                     wts_batch=loss_wts,
+                                                     tokens_batch=tokens,
+                                                     attributes=attributes)
 else:
     sys.exit('Error. Argument rnntype must be tree or linear')
 
@@ -188,9 +157,10 @@ trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                regression_type=args.regressiontype,
                                rnn_hidden_sizes=300, num_rnn_layers=1,
                                regression_hidden_sizes=(150,),
-                               epochs=args.epochs, batch_size=args.batch)
+                               epochs=args.epochs, batch_size=args.batch,
+                               attributes=attributes)
 
-trainer.fit(X=x, Y=y, lr=1e-2, tokens=tokens, verbosity=args.verbosity, loss_weights=loss_weights, lengths=lengths)
+trainer.fit(X=x, Y=y, lr=1e-2, tokens=tokens, verbosity=args.verbosity, loss_weights=loss_wts, lengths=lengths)
 # trainer._regression.load_state_dict(load('trainer.dat'))
 
 # Now to do prediction on developement dataset
@@ -216,29 +186,42 @@ trainer.fit(X=x, Y=y, lr=1e-2, tokens=tokens, verbosity=args.verbosity, loss_wei
 #     data_dev_reduced = data_dev_reduced.append(sample)
 
 dev_x = [struct.sentence for struct in data_dev['Structure']]
-dev_y = data_dev[attr].tolist()
-dev_wts = data_dev[attr_conf].tolist()
 dev_tokens = np.array(data_dev["Noun.Token"].tolist()) + 1
+
 Ns = 2
-conf_mat = np.zeros((Ns, Ns))
-wt_conf_mat = np.zeros((Ns, Ns))
+conf_mat = {}
+wt_conf_mat = {}
+dev_y = {}
+dev_wts = {}
+for attr in attributes:
+    dev_y[attr] = data_dev[attr_map[attr]].tolist()
+    dev_wts[attr] = data_dev[attr_conf[attr]].tolist()
+    conf_mat[attr] = np.zeros((Ns, Ns))
+    wt_conf_mat[attr] = np.zeros((Ns, Ns))
+
 outputs = trainer.predict(X=dev_x, tokens=dev_tokens)
-for output, target, wt in zip(outputs, dev_y, dev_wts):
-    _, ind = max(output, 0)
-    conf_mat[int(ind)][int(target)] += 1
-    wt_conf_mat[int(ind)][int(target)] += wt * 1
+for attr in attributes:
+    for i, output_all in enumerate(outputs):
+        output = output_all[attr]
+        target = dev_y[attr][i]
+        wt = dev_wts[attr][i]
+        _, ind = max(output, 0)
+        conf_mat[attr][int(ind)][int(target)] += 1
+        wt_conf_mat[attr][int(ind)][int(target)] += wt * 1
 
-# Accuracy
-accuracy = sum([conf_mat[i][i] for i in range(Ns)]) / np.sum(conf_mat)
+for attr in attributes:
+    print(attr)
+    # Accuracy
+    accuracy = sum([conf_mat[attr][i][i] for i in range(Ns)]) / np.sum(conf_mat[attr])
 
-# Precision
-p_macro = np.array([conf_mat[i][i] for i in range(Ns)]) / np.array([sum([conf_mat[j][i] for j in range(Ns)]) for i in range(Ns)])
-# Recall
-r_macro = np.array([conf_mat[i][i] for i in range(Ns)]) / np.array([sum([conf_mat[i][j] for j in range(Ns)]) for i in range(Ns)])
+    # Precision
+    p_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][j][i] for j in range(Ns)]) for i in range(Ns)])
+    # Recall
+    r_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][i][j] for j in range(Ns)]) for i in range(Ns)])
 
-# F1 Score
-f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
-macro_acc = np.sum(p_macro) / Ns
-print("Micro Accuracy:", accuracy)
-print("Macro Accuracy:", macro_acc)
-print("Macro F1 score:", f1)
+    # F1 Score
+    f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
+    macro_acc = np.sum(p_macro) / Ns
+    print("Micro Accuracy:", accuracy)
+    print("Macro Accuracy:", macro_acc)
+    print("Macro F1 score:", f1)
