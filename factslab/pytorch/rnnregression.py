@@ -5,16 +5,13 @@ import torch.autograd
 import torch.nn.functional as F
 from torch.nn import Parameter
 from torch.nn import LSTM
-from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
-from scipy.special import huber
+from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss, Dropout
 import pdb
-from random import shuffle
 from collections import Iterable
 from factslab.utility import partition
 from .childsumtreelstm import *
 from torch.nn.utils.rnn import pad_packed_sequence
 from torch.nn.utils.rnn import pack_padded_sequence
-import sys
 
 
 class RNNRegression(torch.nn.Module):
@@ -186,6 +183,7 @@ class RNNRegression(torch.nn.Module):
         self.linear_maps = {}
 
         self.attention = attention
+        self.dropout = Dropout(p=0.8)
 
         if self.attention:
             if self.has_batch_dim:
@@ -193,26 +191,25 @@ class RNNRegression(torch.nn.Module):
                                                            last_size))
             else:
                 self.attention_map = Parameter(torch.zeros(last_size))
-        # pdb.set_trace()
+
         for attr in self.attributes:
-            lin_maps = []
             last_size = self.rnn_output_size
+            self.linear_maps[attr] = []
             for i, h in enumerate(hidden_sizes):
                 linmap = torch.nn.Linear(last_size, h)
                 linmap = linmap.to(self.device)
-                lin_maps.append(linmap)
+                self.linear_maps[attr].append(linmap)
                 varname = '_linear_map' + attr + str(i)
                 RNNRegression.__setattr__(self, varname, linmap)
                 last_size = h
 
             linmap = torch.nn.Linear(last_size, output_size)
             linmap = linmap.to(self.device)
-            lin_maps.append(linmap)
+            self.linear_maps[attr].append(linmap)
             varname = '_linear_map' + attr + str(len(hidden_sizes))
             RNNRegression.__setattr__(self, varname, linmap)
-            self.linear_maps[attr] = lin_maps
 
-    def forward(self, structures, tokens, lengths=None):
+    def forward(self, structures, tokens, lengths, mode):
         """
         Parameters
         ----------
@@ -256,7 +253,7 @@ class RNNRegression(torch.nn.Module):
         else:
             h_last = self.choose_timestep(h_all, tokens)
 
-        h_last = self._run_regression(h_last)
+        h_last = self._run_regression(h_last, mode)
 
         y_hat = self._postprocess_outputs(h_last)
 
@@ -297,7 +294,7 @@ class RNNRegression(torch.nn.Module):
             else:
                 return torch.bmm(att[:, None, :], h_all).squeeze()
 
-    def _run_regression(self, h_in):
+    def _run_regression(self, h_in, mode):
         # Neural davidsonian(simple)
         # pdb.set_trace()
         # h_shared = F.relu(torch.mm(self.attr_shared, h_last.unsqueeze(1)))
@@ -305,6 +302,8 @@ class RNNRegression(torch.nn.Module):
         # for attr in self.attributes:
         #     h[attr] = torch.mm(torch.transpose(h_shared, 0, 1), self.attr_sp[attr]).squeeze()
         h_last = {}
+        if mode == "train":
+            h_in = self.dropout(h_in)
         for attr in self.attributes:
             h_last[attr] = h_in
             for i, linear_map in enumerate(self.linear_maps[attr]):
@@ -332,7 +331,7 @@ class RNNRegression(torch.nn.Module):
         return outputs
 
     def choose_timestep(self, output, idxs):
-        # Index of the last output for each sequence
+        # Index extraction for each sequence
         idx = (idxs - 1).view(-1, 1).expand(output.size(0), output.size(2)).unsqueeze(1).to(self.device)
         return output.gather(1, idx).squeeze()
 
@@ -468,10 +467,6 @@ class RNNRegressionTrainer(object):
 
         self._initialize_trainer_regression()
 
-        # for idx, m in enumerate(self._regression.named_parameters()):
-        #     print(idx, '->', m)
-        # pdb.set_trace()
-
         optimizer = self._optimizer_class(self._regression.parameters(),
                                           **kwargs)
         self._Y_logprob = {}
@@ -483,10 +478,14 @@ class RNNRegressionTrainer(object):
         # each element is of the form ((struct1, struct2, ...),
         #                              target)
         structures_targets = list(zip(self._X, tokens, lengths))
-        loss_trace = []
+        loss_wts_trace = {}
         targ_trace = {}
+        pred_trace = {}
+
         for attr in self.attributes:
             targ_trace[attr] = np.array([])
+            pred_trace[attr] = np.array([])
+            loss_wts_trace[attr] = np.array([])
         epoch = 0
         while epoch < self.epochs:
             epoch += 1
@@ -495,11 +494,10 @@ class RNNRegressionTrainer(object):
                 print("Epoch:", epoch)
                 print("Progress" + "\t Metrics")
 
-            shuffle(structures_targets)
             total = len(self._Y[self.attributes[0]])
 
             for i, structs_targs_batch in enumerate(structures_targets):
-                self._regression.zero_grad()
+                optimizer.zero_grad()
                 if self.rnn_classes == LSTM:
                     structs, tokens, lengths = structs_targs_batch
                     tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
@@ -509,20 +507,26 @@ class RNNRegressionTrainer(object):
                     for attr in self.attributes:
                         loss_wts[attr] = loss_weights[attr][i]
                         targs[attr] = self._Y[attr][i]
-                        loss_wts[attr] = torch.tensor(loss_wts[attr], dtype=torch.float, device=self.device)
-                        targ_trace[attr] = targs[attr]
 
+                        targ_trace[attr] = np.append(targ_trace[attr], targs[attr])
+                        loss_wts_trace[attr] = np.append(loss_wts_trace[attr], loss_wts[attr])
+
+                        loss_wts[attr] = torch.tensor(loss_wts[attr], dtype=torch.float, device=self.device)
                         if self._continuous:
                             targs[attr] = torch.tensor(targs[attr], dtype=torch.long, device=self.device)
                         else:
                             targs[attr] = torch.tensor(targs[attr], dtype=torch.long, device=self.device)
 
-                    predicted = self._regression(structs, tokens, lengths)
+                    predicted = self._regression(structures=structs,
+                                                 tokens=tokens,
+                                                 lengths=lengths,
+                                                 mode="train")
 
                     for attr in self.attributes:
                         loss = self._loss_function(predicted[attr], targs[attr])
-                        losses[attr] = (torch.mm(loss_wts[attr][None, :], loss[:, None]).squeeze()) / len(loss)
-
+                        # losses[attr] = (torch.mm(loss_wts[attr][None, :], loss[:, None]).squeeze()) / len(loss)
+                        losses[attr] = torch.sum(loss) / len(loss)
+                        pred_trace[attr] = np.append(pred_trace[attr], np.array([int(torch.max(p, 0)[1]) for p in predicted[attr]]))
                 else:
                     structs_targs = list(zip(structs_targs_batch[0],
                                              structs_targs_batch[1],
@@ -548,67 +552,44 @@ class RNNRegressionTrainer(object):
                             losses[attr].append(loss)
 
                 loss = sum(losses.values())
-                # pdb.set_trace()
                 loss.backward()
 
                 optimizer.step()
                 losses = {}
-                loss_trace.append(loss.item())
 
                 # TODO: generalize for non-linear regression
                 if verbosity:
                     if not ((i + 1) % verbosity):
                         progress = "{:.4f}".format((i / total) * 100)
-                        self._print_metric(progress, loss_trace, targ_trace, loss_wts)
-                        loss_trace = []
+                        self._print_metric(progress, pred_trace, targ_trace, loss_wts_trace)
+                        loss_wts_trace = {}
                         targ_trace = {}
+                        pred_trace = {}
                         for attr in self.attributes:
                             targ_trace[attr] = np.array([])
+                            pred_trace[attr] = np.array([])
+                            loss_wts_trace[attr] = np.array([])
 
-        torch.save(self._regression.state_dict(), 'genregression.dat')
-
-    def _print_metric(self, progress, loss_trace, targ_trace, loss_wts):
+    def _print_metric(self, progress, pred_trace, targ_trace, loss_wts_trace):
 
         sigdig = 3
-        Y_flat = [y for batch in self._Y for y in batch]
-        if self._continuous:
-            resid_mean = np.mean(loss_trace)
 
-            if self._regression_type == "linear":
-                targ_var = np.mean(np.square(np.array(targ_trace) - np.mean(Y_flat)))
-                r2 = 1. - (resid_mean / targ_var)
-                print(progress + "%" + '\t\t residual variance:\t', np.round(resid_mean, sigdig), '\n',
-                      ' \t\t total variance:\t', np.round(targ_var, sigdig), '\n',
-                      ' \t\t r-squared:\t\t', np.round(r2, sigdig), '\n')
+        # model_mean_neglogprob = np.mean(loss_trace)
+        # targ_mean_neglogprob = 0
+        # for attr in self.attributes:
+        #     targ_mean_neglogprob -= np.mean([a * b for a, b in zip(loss_wts[attr], [self._Y_logprob[attr][int(x)] for x in targ_trace[attr]])])
+        # pnlp = 1. - (model_mean_neglogprob / targ_mean_neglogprob)
 
-            elif self._regression_type == "robust":
-                ae = np.abs(targ_trace - np.median(Y_flat))
-                mae = np.mean(ae)
-                pmae = 1. - (resid_mean / mae)
-
-                print(progress + "%" + '\t\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
-                      ' \t\t total absolute error:\t\t', np.round(mae, sigdig), '\n',
-                      ' \t\t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
-
-            elif self._regression_type == "robust_smooth":
-                ae = huber(1., targ_trace - np.median(Y_flat))
-                mae = np.mean(ae)
-                pmae = 1. - (resid_mean / mae)
-
-                print(progress + "%" + '\t\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
-                      ' \t\t total absolute error:\t\t', np.round(mae, sigdig), '\n',
-                      ' \t\t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
-
-        else:
-            model_mean_neglogprob = np.mean(loss_trace)
-            targ_mean_neglogprob = 0
-            for attr in self.attributes:
-                targ_mean_neglogprob -= np.mean([a * b for a, b in zip(loss_wts[attr], [self._Y_logprob[attr][int(x)] for x in targ_trace[attr]])])
-            pnlp = 1. - (model_mean_neglogprob / targ_mean_neglogprob)
-
-            print(progress + "%" + '\t\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
-                  ' \t\t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
-                  ' \t\t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
+        # print(progress + "%" + '\t\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
+        #       ' \t\t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
+        #       ' \t\t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
+        #       # ' \t\t Accuracy on batch:\t', np.round(pnlp, sigdig), )
+        accuracy = {}
+        for attr in self.attributes:
+            accuracy[attr] = np.sum((pred_trace[attr] == targ_trace[attr]).astype(int) * loss_wts_trace[attr]) / np.sum(loss_wts_trace[attr])
+        print(progress + "%" + '\t\t Is Particular accuracy:\t', np.round(accuracy['part'], sigdig), '\n',
+              ' \t\t Is Kind accuracy:\t', np.round(accuracy['kind'], sigdig), '\n',
+              ' \t\t Is Abstract accuracy:\t', np.round(accuracy['abs'], sigdig), '\n')
 
     def predict(self, X, tokens):
         """Predict using the LSTM regression
@@ -622,6 +603,6 @@ class RNNRegressionTrainer(object):
         predictions = []
         tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
         for x, token in zip(X, tokens):
-            predictions.append(self._regression(x, tokens=token))
+            predictions.append(self._regression(structures=x, tokens=token, lengths=None, mode="test"))
 
         return predictions

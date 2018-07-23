@@ -1,23 +1,17 @@
 import argparse
 import numpy as np
 import pandas as pd
-from os.path import expanduser
-from torch.nn import LSTM, SmoothL1Loss, L1Loss, CrossEntropyLoss
 from factslab.utility import load_glove_embedding, arrange_inputs
-from factslab.datastructures import ConstituencyTree
+from torch.nn import LSTM
+# from factslab.datastructures import ConstituencyTree
 from factslab.datastructures import DependencyTree
 from factslab.pytorch.childsumtreelstm import ChildSumDependencyTreeLSTM
 from factslab.pytorch.rnnregression import RNNRegressionTrainer
-from nltk import DependencyGraph
-from random import randint
 from torch.cuda import is_available
 from torch import device
 from torch import max
 import pdb
 import sys
-from torch import from_numpy, sort
-from torch import save
-from torch import load
 from statistics import mode
 # import h5py
 
@@ -25,6 +19,9 @@ from statistics import mode
 description = 'Run an RNN regression on Genericity protocol annotation.'
 parser = argparse.ArgumentParser(description=description)
 
+parser.add_argument('--data',
+                    type=str,
+                    default='noun_data.tsv')
 parser.add_argument('--structures',
                     type=str,
                     default='structures.tsv')
@@ -48,23 +45,23 @@ parser.add_argument('--verbosity',
                     default="10")
 parser.add_argument('--lr',
                     type=float,
-                    default="0.05")
+                    default="0.01")
 parser.add_argument('--L2',
                     type=float,
-                    default="0.01")
-parser.add_argument('--trainingtype',
-                    type=str,
-                    default="sep",
-                    help="Train on both noun and predicate, or separately")
+                    default="0")
 
 # parse arguments
 args = parser.parse_args()
 
-data = pd.read_csv("noun_data.tsv", sep="\t")
+data = pd.read_csv(args.data, sep="\t")
 
 data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data['Noun.Token'].map(lambda x: str(x))
 response = ["Is.Particular", "Is.Kind", "Is.Abstract"]
 response_conf = ["Part.Confidence", "Kind.Confidence", "Abs.Confidence"]
+
+# Split the datasets into train, dev, test
+data_test = data[data['Split'] == 'test']
+data = data[data['Split'] != 'test']
 
 # Convert responses to 1s and 0s
 for resp in response:
@@ -97,7 +94,6 @@ data['Structure'] = data['Sentence.ID'].map(lambda x: structures[x])
 
 vocab = list(set(sum(vocab, [])))
 data_dev = data[data['Split'] == 'dev']
-data_test = data[data['Split'] == 'test']
 data = data[data['Split'] == 'train']
 
 # load the glove embedding
@@ -107,7 +103,7 @@ embeddings = load_glove_embedding(args.embeddings, vocab)
 
 # pyTorch figures out device to do computation on
 device_to_use = device("cuda:0" if is_available() else "cpu")
-# Split the datasets into train, dev, test
+# Shuffle the data
 data = data.sample(frac=1).reset_index(drop=True)
 data_dev = data_dev.sample(frac=1).reset_index(drop=True)
 data_test = data_test.sample(frac=1).reset_index(drop=True)
@@ -167,29 +163,12 @@ trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                attributes=attributes)
 
 trainer.fit(X=x, Y=y, tokens=tokens, verbosity=args.verbosity, loss_weights=loss_wts, lengths=lengths, lr=args.lr, weight_decay=args.L2)
-# trainer._regression.load_state_dict(load('trainer.dat'))
 
 # Now to do prediction on developement dataset
+predictions = []
 
-# Choose the mode answer and apply 1-conf to minority answer confidence
-# sent_ids = list(set(data_dev['SentenceID.Token'].tolist()))
-# data_dev_reduced = pd.DataFrame()
-# for sent_id in sent_ids:
-#     new_df = data_dev[data_dev['SentenceID.Token'] == sent_id]
-#     sample = new_df.iloc[0]
-
-#     answers = new_df[attr].tolist()
-#     if all(x == answers[0] for x in answers):
-#         mode_ans = answers[0]
-#         new_conf = sum(new_df[attr_conf].tolist()) / 3
-#     else:
-#         mode_ans = mode(answers)
-#         new_df[new_df[attr] != mode_ans][attr_conf] = 1 - new_df[new_df[attr] != mode_ans][attr_conf]
-#         new_conf = sum(new_df[attr_conf].tolist()) / 3
-
-#     sample[attr] = mode_ans
-#     sample[attr_conf] = new_conf
-#     data_dev_reduced = data_dev_reduced.append(sample)
+data_dev = pd.read_csv("data_dev_reduced.tsv", sep="\t")
+data_dev['Structure'] = data_dev['Sentence.ID'].map(lambda x: structures[x])
 
 dev_x = [struct.sentence for struct in data_dev['Structure']]
 dev_tokens = np.array(data_dev["Noun.Token"].tolist()) + 1
@@ -205,9 +184,9 @@ for attr in attributes:
     conf_mat[attr] = np.zeros((Ns, Ns))
     wt_conf_mat[attr] = np.zeros((Ns, Ns))
 
-outputs = trainer.predict(X=dev_x, tokens=dev_tokens)
+predictions = trainer.predict(X=dev_x, tokens=dev_tokens)
 for attr in attributes:
-    for i, output_all in enumerate(outputs):
+    for i, output_all in enumerate(predictions):
         output = output_all[attr]
         target = dev_y[attr][i]
         wt = dev_wts[attr][i]
@@ -225,6 +204,24 @@ for attr in attributes:
     p_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][j][i] for j in range(Ns)]) for i in range(Ns)])
     # Recall
     r_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][i][j] for j in range(Ns)]) for i in range(Ns)])
+
+    # F1 Score
+    f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
+    macro_acc = np.sum(p_macro) / Ns
+    print("Micro Accuracy:", accuracy)
+    print("Macro Accuracy:", macro_acc)
+    print("Macro F1 score:", f1)
+
+for attr in attributes:
+    print(attr)
+    print(wt_conf_mat[attr])
+    # Accuracy
+    accuracy = sum([wt_conf_mat[attr][i][i] for i in range(Ns)]) / np.sum(wt_conf_mat[attr])
+
+    # Precision
+    p_macro = np.array([wt_conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([wt_conf_mat[attr][j][i] for j in range(Ns)]) for i in range(Ns)])
+    # Recall
+    r_macro = np.array([wt_conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([wt_conf_mat[attr][i][j] for j in range(Ns)]) for i in range(Ns)])
 
     # F1 Score
     f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
