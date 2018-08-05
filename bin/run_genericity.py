@@ -10,18 +10,16 @@ from factslab.pytorch.rnnregression import RNNRegressionTrainer
 from torch.cuda import is_available
 from torch import device
 from torch import max
-import pdb
 import sys
-from statistics import mode
-# import h5py
+from sklearn.svm import SVC
 
 # initialize argument parser
 description = 'Run an RNN regression on Genericity protocol annotation.'
 parser = argparse.ArgumentParser(description=description)
 
-parser.add_argument('--data',
+parser.add_argument('--attr',
                     type=str,
-                    default='noun_data.tsv')
+                    default="noun")
 parser.add_argument('--structures',
                     type=str,
                     default='structures.tsv')
@@ -42,22 +40,44 @@ parser.add_argument('--rnntype',
                     default="tree")
 parser.add_argument('--verbosity',
                     type=int,
-                    default="10")
+                    default="1")
 parser.add_argument('--lr',
                     type=float,
                     default="0.01")
 parser.add_argument('--L2',
                     type=float,
                     default="0")
+parser.add_argument('--attention',
+                    action='store_true',
+                    help='Turn attention on or off')
 
 # parse arguments
 args = parser.parse_args()
 
-data = pd.read_csv(args.data, sep="\t")
+if args.attr == "noun":
+    datafile = "noun_data.tsv"
+    dev_datafile = "noun_data_dev.tsv"
+    response = ["Is.Particular", "Is.Kind", "Is.Abstract"]
+    response_conf = ["Part.Confidence", "Kind.Confidence", "Abs.Confidence"]
+    attributes = ["part", "kind", "abs"]
+    attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
+    attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
+             "abs": "Abs.Confidence"}
+    token_col = "Noun.Token"
+else:
+    datafile = "pred_data.tsv"
+    dev_datafile = "pred_data_dev.tsv"
+    response = ["Is.Particular", "Is.Hypothetical", "Is.Dynamic"]
+    response_conf = ["Part.Confidence", "Hyp.Confidence", "Dyn.Confidence"]
+    attributes = ["part", "hyp", "dyn"]
+    attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
+    attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
+             "hyp": "Hyp.Confidence"}
+    token_col = "Pred.Root.Token"
 
-data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data['Noun.Token'].map(lambda x: str(x))
-response = ["Is.Particular", "Is.Kind", "Is.Abstract"]
-response_conf = ["Part.Confidence", "Kind.Confidence", "Abs.Confidence"]
+data = pd.read_csv(datafile, sep="\t")
+
+data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data[token_col].map(lambda x: str(x))
 
 # Split the datasets into train, dev, test
 data_test = data[data['Split'] == 'test']
@@ -108,10 +128,6 @@ data = data.sample(frac=1).reset_index(drop=True)
 data_dev = data_dev.sample(frac=1).reset_index(drop=True)
 data_test = data_test.sample(frac=1).reset_index(drop=True)
 # Define attributes for regression
-attributes = ["part", "kind", "abs"]
-attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
-attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
-             "abs": "Abs.Confidence"}
 
 if args.rnntype == "tree":
     # Handle the tree input structuring here. No minibatch
@@ -128,7 +144,7 @@ elif args.rnntype == "linear":
     rnntype = LSTM
     x_raw = [struct.sentence for struct in data['Structure']]
     x = [x_raw[i:i + args.batch] for i in range(0, len(x_raw), args.batch)]
-    tokens_raw = data["Noun.Token"].values
+    tokens_raw = data[token_col].values
     tokens = [tokens_raw[i:i + args.batch] for i in range(0, len(tokens_raw), args.batch)]
     y = {}
     loss_wts = {}
@@ -152,6 +168,19 @@ elif args.rnntype == "linear":
 else:
     sys.exit('Error. Argument rnntype must be tree or linear')
 
+# Initialise dev data
+data_dev = pd.read_csv(dev_datafile, sep="\t")
+data_dev['Structure'] = data_dev['Sentence.ID'].map(lambda x: structures[x])
+
+dev_x = [struct.sentence for struct in data_dev['Structure']]
+dev_tokens = np.array(data_dev[token_col].tolist()) + 1
+
+dev_y = {}
+dev_wts = {}
+for attr in attributes:
+    dev_y[attr] = data_dev[attr_map[attr]].tolist()
+    dev_wts[attr] = data_dev[attr_conf[attr]].tolist()
+
 # train the model
 trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                rnn_classes=rnntype,
@@ -162,70 +191,4 @@ trainer = RNNRegressionTrainer(embeddings=embeddings, device=device_to_use,
                                epochs=args.epochs, batch_size=args.batch,
                                attributes=attributes)
 
-trainer.fit(X=x, Y=y, tokens=tokens, verbosity=args.verbosity, loss_weights=loss_wts, lengths=lengths, lr=args.lr, weight_decay=args.L2)
-
-# Now to do prediction on developement dataset
-predictions = []
-
-data_dev = pd.read_csv("data_dev_reduced.tsv", sep="\t")
-data_dev['Structure'] = data_dev['Sentence.ID'].map(lambda x: structures[x])
-
-dev_x = [struct.sentence for struct in data_dev['Structure']]
-dev_tokens = np.array(data_dev["Noun.Token"].tolist()) + 1
-
-Ns = 2
-conf_mat = {}
-wt_conf_mat = {}
-dev_y = {}
-dev_wts = {}
-for attr in attributes:
-    dev_y[attr] = data_dev[attr_map[attr]].tolist()
-    dev_wts[attr] = data_dev[attr_conf[attr]].tolist()
-    conf_mat[attr] = np.zeros((Ns, Ns))
-    wt_conf_mat[attr] = np.zeros((Ns, Ns))
-
-predictions = trainer.predict(X=dev_x, tokens=dev_tokens)
-for attr in attributes:
-    for i, output_all in enumerate(predictions):
-        output = output_all[attr]
-        target = dev_y[attr][i]
-        wt = dev_wts[attr][i]
-        _, ind = max(output, 0)
-        conf_mat[attr][int(ind)][int(target)] += 1
-        wt_conf_mat[attr][int(ind)][int(target)] += wt * 1
-
-for attr in attributes:
-    print(attr)
-    print(conf_mat[attr])
-    # Accuracy
-    accuracy = sum([conf_mat[attr][i][i] for i in range(Ns)]) / np.sum(conf_mat[attr])
-
-    # Precision
-    p_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][j][i] for j in range(Ns)]) for i in range(Ns)])
-    # Recall
-    r_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][i][j] for j in range(Ns)]) for i in range(Ns)])
-
-    # F1 Score
-    f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
-    macro_acc = np.sum(p_macro) / Ns
-    print("Micro Accuracy:", accuracy)
-    print("Macro Accuracy:", macro_acc)
-    print("Macro F1 score:", f1)
-
-for attr in attributes:
-    print(attr)
-    print(wt_conf_mat[attr])
-    # Accuracy
-    accuracy = sum([wt_conf_mat[attr][i][i] for i in range(Ns)]) / np.sum(wt_conf_mat[attr])
-
-    # Precision
-    p_macro = np.array([wt_conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([wt_conf_mat[attr][j][i] for j in range(Ns)]) for i in range(Ns)])
-    # Recall
-    r_macro = np.array([wt_conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([wt_conf_mat[attr][i][j] for j in range(Ns)]) for i in range(Ns)])
-
-    # F1 Score
-    f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
-    macro_acc = np.sum(p_macro) / Ns
-    print("Micro Accuracy:", accuracy)
-    print("Macro Accuracy:", macro_acc)
-    print("Macro F1 score:", f1)
+trainer.fit(X=x, Y=y, tokens=tokens, verbosity=args.verbosity, loss_weights=loss_wts, lengths=lengths, lr=args.lr, weight_decay=args.L2, dev=[dev_x, dev_tokens, dev_y, dev_wts])
