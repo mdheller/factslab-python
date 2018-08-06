@@ -1,10 +1,9 @@
 import sys
 import torch
 import torch.nn.functional as F
-
+import pdb
 from abc import ABCMeta, abstractmethod
 from factslab.datastructures import ConstituencyTree
-from torch.autograd import Variable
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.rnn import RNNBase
 
@@ -12,6 +11,7 @@ if sys.version_info.major == 3:
     from functools import lru_cache
 else:
     from functools32 import lru_cache
+
 
 class ChildSumTreeLSTM(RNNBase):
     """A bidirectional extension of child-sum tree LSTMs
@@ -23,24 +23,24 @@ class ChildSumTreeLSTM(RNNBase):
     """
 
     __metaclass__ = ABCMeta
-    
-    def __init__(self, *args, **kwargs):        
+
+    def __init__(self, *args, **kwargs):
         super(ChildSumTreeLSTM, self).__init__('LSTM', *args, **kwargs)
 
         # lru_cache is normally used as a decorator, but that usage
         # leads to a global cache, where we need an instance specific
         # cache
         self._get_parameters = lru_cache()(self._get_parameters)
-        
+
     @staticmethod
     def nonlinearity(x):
         return F.tanh(x)
-        
+
     def forward(self, inputs, tree):
         """
         Parameters
         ----------
-        inputs : torch.autograd.Variable
+        inputs : torch.Tensor
             a 2D (steps x embedding dimension) or a 3D tensor (steps x
             batch dimension x embedding dimension); the batch
             dimension must always have size == 1, since this module
@@ -54,8 +54,8 @@ class ChildSumTreeLSTM(RNNBase):
 
         Returns
         -------
-        hidden_all : torch.autograd.Variable
-        hidden_final : torch.autograd.Variable
+        hidden_all : torch.Tensor
+        hidden_final : torch.Tensor
             the hidden state of the trees root node; if there are two
             or more such nodes, the average of their hidden states is
             returned
@@ -81,10 +81,10 @@ class ChildSumTreeLSTM(RNNBase):
         # more hidden states than there are inputs
         indices = tree.positions
 
-        hidden_up = self.hidden_state[self.num_layers-1]['up']
+        hidden_up = self.hidden_state[self.num_layers - 1]['up']
 
         if self.bidirectional:
-            hidden_down = self.hidden_state[self.num_layers-1]['down']
+            hidden_down = self.hidden_state[self.num_layers - 1]['down']
             hidden_all = [torch.cat([hidden_up[i], hidden_down[i]])
                           for i in indices]
         else:
@@ -99,9 +99,9 @@ class ChildSumTreeLSTM(RNNBase):
 
         if self._has_batch_dimension:
             if self.batch_first:
-                return hidden_all[None,:,:], hidden_final[None,:]
+                return hidden_all[None, :, :], hidden_final[None, :]
             else:
-                return hidden_all[:,None,:], hidden_final[None,:]
+                return hidden_all[:, None, :], hidden_final[None, :]
         else:
             return hidden_all, hidden_final
 
@@ -119,7 +119,7 @@ class ChildSumTreeLSTM(RNNBase):
 
         oidx, (h_prev, c_prev) = self._construct_previous(layer, direction,
                                                           inputs, tree, idx)
-        
+
         if self.bias:
             Wih, Whh, bih, bhh = self._get_parameters(layer, direction)
 
@@ -130,16 +130,16 @@ class ChildSumTreeLSTM(RNNBase):
 
             # print(x_t.size())
             # print(h_prev.size())
-            
+
             fcio_t_raw = torch.matmul(Whh, h_prev) +\
-                         torch.matmul(Wih, x_t[:,None]) +\
-                         bhh[:,None] + bih[:,None]
+                torch.matmul(Wih, x_t[:, None]) +\
+                bhh[:, None] + bih[:, None]
 
         else:
             Wih, Whh = self._get_parameters(layer, direction)
 
             fcio_t_raw = torch.matmul(Whh, h_prev) +\
-                         torch.matmul(Wih, x_t[:,None])
+                torch.matmul(Wih, x_t[:, None])
 
         f_t_raw, c_hat_t_raw, i_t_raw, o_t_raw = torch.split(fcio_t_raw,
                                                              self.hidden_size,
@@ -237,18 +237,15 @@ class ChildSumTreeLSTM(RNNBase):
             c_prev = torch.stack(c_prev, 1)
 
         elif inputs.is_cuda:
-            h_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False).cuda()
-            c_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False).cuda()
+            h_prev = torch.zeros(self.hidden_size, 1).cuda()
+            c_prev = torch.zeros(self.hidden_size, 1).cuda()
 
         else:
-            h_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False)
-            c_prev = Variable(torch.zeros(self.hidden_size, 1),
-                              requires_grad=False)
+            h_prev = torch.zeros(self.hidden_size, 1)
+            c_prev = torch.zeros(self.hidden_size, 1)
 
         return oidx, (h_prev, c_prev)
+
 
 class ChildSumDependencyTreeLSTM(ChildSumTreeLSTM):
     """A bidirectional extension of child-sum dependency tree LSTMs
@@ -268,16 +265,18 @@ class ChildSumDependencyTreeLSTM(ChildSumTreeLSTM):
 
     """
 
-    def _construct_x_t(self, layer, inputs, idx, *args):
+    def _construct_x_t(self, layer, inputs, idx, tree):
         if layer > 0 and self.bidirectional:
-            x_t = torch.cat([self.hidden_state[layer-1]['up'][idx],
-                             self.hidden_state[layer-1]['down'][idx]])
+            x_t = torch.cat([self.hidden_state[layer - 1]['up'][idx],
+                             self.hidden_state[layer - 1]['down'][idx]])
         elif layer > 0:
-            x_t = self.hidden_state[layer-1]['up'][idx]
+            x_t = self.hidden_state[layer - 1]['up'][idx]
         elif self._has_batch_dimension:
-            x_t = inputs[idx,0]
+            word_idx = tree.word_index(idx)
+            x_t = inputs[word_idx, 0]
         else:
-            x_t = inputs[idx]
+            word_idx = tree.word_index(idx)
+            x_t = inputs[word_idx]
 
         return x_t
 
@@ -298,30 +297,28 @@ class ChildSumConstituencyTreeLSTM(ChildSumTreeLSTM):
 
     def _construct_x_t(self, layer, inputs, idx, tree):
         if layer > 0 and self.bidirectional:
-            x_t = torch.cat([self.hidden_state[layer-1]['up'][idx],
-                             self.hidden_state[layer-1]['down'][idx]])
+            x_t = torch.cat([self.hidden_state[layer - 1]['up'][idx],
+                             self.hidden_state[layer - 1]['down'][idx]])
         elif layer > 0:
-            x_t = self.hidden_state[layer-1]['up'][idx]
+            x_t = self.hidden_state[layer - 1]['up'][idx]
         else:
             if idx in tree.terminal_indices:
                 string_idx = tree.terminal_indices.index(idx)
 
                 if self._has_batch_dimension:
-                    x_t = inputs[string_idx,0]
+                    x_t = inputs[string_idx, 0]
                 else:
                     x_t = inputs[string_idx]
             else:
                 if self._has_batch_dimension:
-                    x_t_raw = torch.zeros(self.input_size,1)
+                    x_t_raw = torch.zeros(self.input_size, 1)
                 else:
                     x_t_raw = torch.zeros(self.input_size)
 
                 if inputs.is_cuda:
-                    x_t = Variable(x_t_raw,
-                                   requires_grad=False).cuda()
+                    x_t = x_t_raw.cuda()
 
                 else:
-                    x_t = Variable(x_t_raw,
-                                   requires_grad=False)
+                    x_t = x_t_raw
 
         return x_t
