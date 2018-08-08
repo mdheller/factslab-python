@@ -75,9 +75,9 @@ def arrange_inputs(data_batch, targets_batch, wts_batch, tokens_batch, attribute
         for data, tokens in zip(data_batch, tokens_batch):
             seq_len = from_numpy(np.array([len(x) for x in data]))
             sorted_seq_len, sorted_idx = sort(seq_len, descending=True)
-            max_len = sorted_seq_len[0]
+            # max_len = sorted_seq_len[0]
             sorted_seq_len_batch.append(np.array(sorted_seq_len))
-            sorted_data = [data[x] + ['<PAD>' for i in range(max_len - len(data[x]))] for x in sorted_idx]
+            sorted_data = [data[x] for x in sorted_idx]
             sorted_tokens = np.array([(tokens[x] + 1) for x in sorted_idx])
             sorted_data_batch.append(sorted_data)
             sorted_tokens_batch.append(sorted_tokens)
