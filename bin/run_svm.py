@@ -1,11 +1,55 @@
 import argparse
 import numpy as np
 import pandas as pd
-from factslab.utility import load_glove_embedding
+# from factslab.utility import load_glove_embedding
 from sklearn.svm import SVC
-from factslab.datastructures import DependencyTree
+# from factslab.datafeatures import DependencyTree
 from math import sqrt
 # from allennlp.modules.elmo import Elmo, batch_to_ids
+from predpatt import load_conllu
+from predpatt import PredPatt
+from predpatt import PredPattOpts
+from os.path import expanduser
+
+
+def noun2features(sent_feat, token):
+    '''Extract features from a word'''
+    sent = sent_feat[0]
+    feats = sent_feat[1]
+    words = sent.tokens[token].text
+    deps = [x[2].tag for x in sent.tokens[token].dependents]
+    deps_text = [x[2].text for x in sent.tokens[token].dependents]
+    features = [int('Number=Plur' in feats[token]),        # plural
+                int('DET' in deps),                        # has determiner
+                int('the' in deps_text),              # has 'the' determiner
+                int('some' in deps_text),             # has 'some' quantifier
+                int('many' in deps_text),             # has 'many' quantifier
+                int('few' in deps_text),              # has 'few' quantifier
+                int('Definite=Ind' in feats[token]),  # Indefinite
+                int('Definite=Def' in feats[token])   # Definite
+                ]
+    return np.array(features)
+
+
+def pred2features(sent_feat, token):
+    '''Extract features from a word'''
+    sent = sent_feat[0]
+    feats = sent_feat[1]
+    words = sent.tokens[token].text
+    deps = [x[2].tag for x in sent.tokens[token].dependents]
+    deps_text = [x[2].text for x in sent.tokens[token].dependents]
+    modals = ['can', 'could', 'should', 'would']
+    features = [int('Tense=Past' in feats[token]),       # Past tense
+                int('Tense=Pres' in feats[token]),       # Present tense
+                int('VerbForm=Fin' in feats[token]),     # Finitive
+                int('VerbForm=Inf' in feats[token]),     # Infinitive
+                int('VerbForm=Part' in feats[token]),    # Participle
+                int('VerbForm=Ger' in feats[token]),     # Gerund
+                int('AUX' in deps),                      # Auxillary
+                int(bool(set(modals) & set(deps_text)))  # Modals
+                ]
+    return np.array(features)
+
 
 # initialize argument parser
 description = 'Run an RNN regression on Genericity protocol annotation.'
@@ -14,12 +58,15 @@ parser = argparse.ArgumentParser(description=description)
 parser.add_argument('--prot',
                     type=str,
                     default="noun")
-parser.add_argument('--structures',
+parser.add_argument('--features',
                     type=str,
-                    default='structures.tsv')
+                    default='features.tsv')
 parser.add_argument('--embeddings',
                     type=str,
                     default='../../../../Downloads/embeddings/glove.42B.300d')
+parser.add_argument('--regressiontype',
+                    type=str,
+                    default="linear")
 
 # parse arguments
 args = parser.parse_args()
@@ -34,6 +81,7 @@ if args.prot == "noun":
     attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
              "abs": "Abs.Confidence"}
     token_col = "Noun.Token"
+    features_func = noun2features
 else:
     datafile = "pred_data.tsv"
     dev_datafile = "pred_data_dev.tsv"
@@ -44,6 +92,7 @@ else:
     attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
              "hyp": "Hyp.Confidence"}
     token_col = "Pred.Root.Token"
+    features_func = pred2features
 
 data = pd.read_csv(datafile, sep="\t")
 
@@ -68,26 +117,41 @@ else:
         data[resp] = data.groupby('Annotator.ID')[resp].apply(lambda x: x.rank() / (len(x) + 1.))
         data[resp] = np.log(data[resp]) - np.log(1. - data[resp])
 
-# Load the structures
-structures = {}
-vocab = []
+# Load the features
+features = {}
+# vocab = []
 
-# Don't read_csv the structures file. read_csv can't handle quotes
-with open(args.structures, 'r') as f:
+# Don't read_csv the features file. read_csv can't handle quotes
+with open(args.features, 'r') as f:
     for line in f.readlines():
-        structs = line.split('\t')
-        structures[structs[0]] = DependencyTree.fromstring(structs[1])
-        structures[structs[0]].sentence = structs[2].split()
-        vocab.append(structs[2].split())
-# pdb.set_trace()
-data['Structure'] = data['Sentence.ID'].map(lambda x: structures[x])
+        feats = line.split('\t')
+        # features[feats[0]] = DependencyTree.fromstring(feats[1])
+        features[feats[0]] = feats[1].split()
+        # vocab.append(feats[2].split())
 
-vocab = list(set(sum(vocab, [])))
+# Load the predpatt objects for creating features
+
+files = ['/UD_English-r1.2/en-ud-train.conllu',
+         '/UD_English-r1.2/en-ud-dev.conllu',
+         '/UD_English-r1.2/en-ud-test.conllu']
+home = expanduser("~/Downloads/")
+options = PredPattOpts(resolve_relcl=True, borrow_arg_for_relcl=True, resolve_conj=False, cut=True)  # Resolve relative clause
+patt = {}
+
+for file in files:
+    path = home + file
+    with open(path, 'r') as infile:
+        for sent_id, ud_parse in load_conllu(infile.read()):
+            patt[file[17:] + " " + sent_id] = PredPatt(ud_parse, opts=options)
+
+data['Structure'] = data['Sentence.ID'].map(lambda x: (patt[x], features[x]))
+
+# vocab = list(set(sum(vocab, [])))
 data_dev = data[data['Split'] == 'dev']
 data = data[data['Split'] == 'train']
 
 # load the glove embedding
-embeddings = load_glove_embedding(args.embeddings, vocab)
+# embeddings = load_glove_embedding(args.embeddings, vocab)
 # ELMO embeddings
 # options_file = "/Users/venkat/Downloads/embeddings/options.json"
 # weight_file = "/Users/venkat/Downloads/embeddings/weights.hdf5"
@@ -99,14 +163,11 @@ data_dev = data_dev.sample(frac=1).reset_index(drop=True)
 data_test = data_test.sample(frac=1).reset_index(drop=True)
 # Define attributes for regression
 
-raw_x = [struct.sentence for struct in data['Structure']]
-tokens = np.array(data[token_col].tolist())
+raw_x = [struct for struct in data['Structure']]
+tokens = data[token_col].tolist()
 
 x = []
-
-for i in range(len(raw_x)):
-    x.append(embeddings.loc[raw_x[i][tokens[i]]].values)
-x = np.array(x)
+x = np.array([features_func(sent, token) for sent, token in zip(raw_x, tokens)])
 y = {}
 loss_wts = {}
 
@@ -116,26 +177,24 @@ for attr in attributes:
     y[attr] = y[attr]
 
 # Initialise dev data
-    data_dev = pd.read_csv(dev_datafile, sep="\t")
-    data_dev['Structure'] = data_dev['Sentence.ID'].map(lambda x: structures[x])
+data_dev = pd.read_csv(dev_datafile, sep="\t")
+data_dev['Structure'] = data_dev['Sentence.ID'].map(lambda x: (patt[x], features[x]))
 
-    raw_dev_x = [struct.sentence for struct in data_dev['Structure']]
-    dev_tokens = np.array(data_dev[token_col].tolist())
+raw_dev_x = [struct for struct in data_dev['Structure']]
+dev_tokens = data_dev[token_col].tolist()
 
-    dev_x = []
-    for i in range(len(raw_dev_x)):
-        dev_x.append(embeddings.loc[raw_dev_x[i][dev_tokens[i]]].values)
-    dev_x = np.array(dev_x)
-    dev_y = {}
-    dev_wts = {}
-    for attr in attributes:
-        dev_y[attr] = data_dev[attr_map[attr]].tolist()
-        dev_wts[attr] = data_dev[attr_conf[attr]].tolist()
+dev_x = np.array([features_func(sent, token) for sent, token in zip(raw_dev_x, dev_tokens)])
+dev_y = {}
+dev_wts = {}
+
+for attr in attributes:
+    dev_y[attr] = data_dev[attr_map[attr]].tolist()
+    dev_wts[attr] = data_dev[attr_conf[attr]].tolist()
 
 for attr in attributes:
     # train the model
     trainer = SVC()
-    trainer.fit(x, y[attr])
+    trainer.fit(x, y[attr], sample_weight=loss_wts[attr])
 
     predictions = trainer.predict(dev_x)
 
