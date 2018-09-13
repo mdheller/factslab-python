@@ -2,7 +2,7 @@ import argparse
 import numpy as np
 import pandas as pd
 # from factslab.utility import load_glove_embedding
-from sklearn.svm import SVC
+from sklearn.svm import LinearSVC
 # from factslab.datafeatures import DependencyTree
 from math import sqrt
 # from allennlp.modules.elmo import Elmo, batch_to_ids
@@ -16,17 +16,25 @@ def noun2features(sent_feat, token):
     '''Extract features from a word'''
     sent = sent_feat[0]
     feats = sent_feat[1]
-    words = sent.tokens[token].text
+    # words = sent.tokens[token].text
     deps = [x[2].tag for x in sent.tokens[token].dependents]
     deps_text = [x[2].text for x in sent.tokens[token].dependents]
-    features = [int('Number=Plur' in feats[token]),        # plural
-                int('DET' in deps),                        # has determiner
+    features = [int('Number=Plur' in feats[token]),   # plural
+                int('Number=Sing' in feats[token]),   # singular
+                int('DET' in deps),                   # has determiner
                 int('the' in deps_text),              # has 'the' determiner
                 int('some' in deps_text),             # has 'some' quantifier
                 int('many' in deps_text),             # has 'many' quantifier
                 int('few' in deps_text),              # has 'few' quantifier
                 int('Definite=Ind' in feats[token]),  # Indefinite
-                int('Definite=Def' in feats[token])   # Definite
+                int('Definite=Def' in feats[token]),  # Definite
+                int('Gender=Masc' in feats[token]),   # Masculine
+                int('Gender=Fem' in feats[token]),    # Feminine
+                int('Gender=Neut' in feats[token]),   # Neutral
+                int('PronType=Prs' in feats[token]),  # personal pronouns
+                int('PronType=Art' in feats[token]),  # article
+                int('Poss=Yes' in feats[token]),      # Possessive
+                int('Abbr=Yes' in feats[token])       # Abbreviation
                 ]
     return np.array(features)
 
@@ -92,7 +100,7 @@ else:
     attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
              "hyp": "Hyp.Confidence"}
     token_col = "Pred.Root.Token"
-    features_func = pred2features
+    features_func = noun2features
 
 data = pd.read_csv(datafile, sep="\t")
 
@@ -193,14 +201,14 @@ for attr in attributes:
 
 for attr in attributes:
     # train the model
-    trainer = SVC()
+    trainer = LinearSVC()
     trainer.fit(x, y[attr], sample_weight=loss_wts[attr])
 
-    predictions = trainer.predict(dev_x)
+    predictions = trainer.predict(x)
 
     conf_mat = np.zeros((2, 2))
     for i, output in enumerate(predictions):
-        target = dev_y[attr][i]
+        target = y[attr][i]
         conf_mat[int(output)][int(target)] += 1
     print(attr)
     print(conf_mat)
