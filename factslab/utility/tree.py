@@ -1,6 +1,7 @@
-# A script to print convert all UD conllu
-from nltk import DependencyGraph
+# A script to print sentence ids and corresponding sentence
+# from nltk import DependencyGraph
 import re
+from os.path import expanduser
 
 
 def html_ify(s):
@@ -12,11 +13,15 @@ def html_ify(s):
     return html_string
 
 
-files = ['en-ud-train.conllu', 'en-ud-dev.conllu', 'en-ud-test.conllu']
+files = ['/UD_English-r1.2/en-ud-train.conllu',
+         '/UD_English-r1.2/en-ud-dev.conllu',
+         '/UD_English-r1.2/en-ud-test.conllu']
+home = expanduser("~/Downloads/")
 structures = []
 for file in files:
-    with open('structures.tsv', 'a') as fout:
-        with open(file, 'r') as f:
+    path = home + file
+    with open('../../../../protocols/data/structures.tsv', 'a') as fout:
+        with open(path, 'r') as f:
             id = 0
             a = ""
             words = []
@@ -27,11 +32,11 @@ for file in files:
                 else:
                     id += 1
                     a = html_ify(a)
-                    structure = DependencyGraph(a, top_relation_label='root')
+                    # structure = DependencyGraph(a, top_relation_label='root')
                     sent = " ".join(words)
                     sent = html_ify(sent)
                     sent_id = file + " sent_" + str(id)
-                    structures.append(structure)
+                    # structures.append(structure)
                     a = ""
                     words = []
-                    fout.write(sent_id + "\t" + " ".join(str(structures[-1].tree()).splitlines()) + "\t" + sent + "\n")
+                    fout.write(sent_id + "\t" + sent + "\n")

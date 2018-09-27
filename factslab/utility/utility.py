@@ -91,3 +91,27 @@ def arrange_inputs(data_batch, targets_batch, wts_batch, tokens_batch, attribute
                 sorted_wts_batch[attr].append(sorted_wts)
 
         return sorted_data_batch, sorted_targets_batch, sorted_wts_batch, sorted_seq_len_batch, sorted_tokens_batch
+
+def ridit(x):
+    '''apply ridit scoring
+
+    Parameters
+    ----------
+    x : iterable
+
+    Returns
+    -------
+    numpy.array
+    '''
+    x_flat = np.array(x, dtype=int).flatten()
+    x_shift = x_flat - x_flat.min()     # bincount requires nonnegative ints
+
+    bincounts = np.bincount(x_shift)
+    props = bincounts / bincounts.sum()
+
+    cumdist = np.cumsum(props)
+    cumdist[-1] = 0.                    # this looks odd but is right
+
+    ridit_map = np.array([cumdist[i - 1] + p / 2 for i, p in enumerate(props)])
+
+    return ridit_map[x_shift]

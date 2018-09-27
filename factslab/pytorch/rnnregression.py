@@ -77,9 +77,10 @@ class RNNRegression(torch.nn.Module):
 
         self.device = device
         self.batch_size = batch_size
-        # initialize model
         # self._initialize_embeddings(embeddings, vocab)
+        # ELMO
         self.embeddings = embeddings
+        self.embeddings.requires_grad = False
         self.embedding_size = 1024
         self._initialize_rnn(rnn_classes, rnn_hidden_sizes,
                              num_rnn_layers, bidirectional)
@@ -245,6 +246,7 @@ class RNNRegression(torch.nn.Module):
             self.has_batch_dim = True
         else:
             self.has_batch_dim = False
+            words = [words]
 
         inputs = self._get_inputs(words)
         inputs = self._preprocess_inputs(inputs)
@@ -274,7 +276,7 @@ class RNNRegression(torch.nn.Module):
                 h_all, (h_last, c_last) = rnn(packed)
                 h_all, _ = pad_packed_sequence(h_all, batch_first=True)
             else:
-                h_all, (h_last, c_last) = rnn(inputs.unsqueeze(0))
+                h_all, (h_last, c_last) = rnn(inputs)
             inputs = h_all.squeeze()
 
         return h_all, h_last
@@ -339,13 +341,13 @@ class RNNRegression(torch.nn.Module):
         return output.gather(1, idx).squeeze()
 
     def _get_inputs(self, inputs):
-        if self.has_batch_dim:
+        # if self.has_batch_dim:
             # indices = []
             # for sent in inputs:
             #     indices.append([self.vocab_hash[word] for word in sent])
-            indices = batch_to_ids(inputs)
-        else:
-            indices = [self.vocab_hash[word] for word in inputs]
+        # else:
+        #     indices = [self.vocab_hash[word] for word in inputs]
+        indices = batch_to_ids(inputs)
         indices = torch.tensor(indices, dtype=torch.long, device=self.device)
         return self.embeddings(indices)['elmo_representations'][0]
 
@@ -472,9 +474,9 @@ class RNNRegressionTrainer(object):
         self._initialize_trainer_regression()
         parameters = [p for p in self._regression.parameters() if p.requires_grad]
 
-        # for name, param in self._regression.named_parameters():
-        #     if param.requires_grad:
-        #         print(name, param.shape)
+        for name, param in self._regression.named_parameters():
+            if param.requires_grad:
+                print(name, param.shape)
         # for k, v in self._regression.state_dict().items():
         #     print(k, type(v))
         optimizer = self._optimizer_class(parameters, **kwargs)
