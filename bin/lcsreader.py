@@ -1,5 +1,5 @@
 import re
-import numpy as np
+# import numpy as np
 import pandas as pd
 from collections import defaultdict
 from pyparsing import nestedExpr
@@ -11,19 +11,19 @@ class LexicalConceptualStructureLexicon(object):
         entries = defaultdict(list)
         curr_entry = {}
 
-        for l in open(filename):
+        for line in open(filename):
 
-            l = l.strip()
+            line = line.strip()
 
             # if the *only* thing in the line is "(" don't want to
             # miss multi-line values by saying l[0] == '('
-            if not l or l == '(':
+            if not line or line == '(':
                 continue
 
             # we have stripped off the leading space so we just need
             # to check for the first character
-            elif l[0] == ':':
-                curr_attr, curr_val = re.findall(':(.+?)\s(.+)', l)[0]
+            elif line[0] == ':':
+                curr_attr, curr_val = re.findall(':(.+?)\s(.+)', line)[0]
 
                 curr_attr = curr_attr.replace('_', '').lower()
                 curr_attr = 'wordclass' if curr_attr == 'class' else curr_attr
@@ -32,14 +32,14 @@ class LexicalConceptualStructureLexicon(object):
                 curr_entry[curr_attr] = curr_val.replace('"', '')
 
             # same as for entry opener
-            elif l == ')':
+            elif line == ')':
                 entry = LexicalConceptualStructureLexiconEntry(**curr_entry)
                 entries[entry.word].append(entry)
 
             # if the line isn't a comment, the only remaining thing it
             # could be is the non-first line in a multi-line value
-            elif l[0] != ';':
-                curr_val = l
+            elif line[0] != ';':
+                curr_val = line
                 curr_entry[curr_attr] += curr_val.replace('"', '')
 
         self._entries = dict(entries)
@@ -87,20 +87,19 @@ class LexicalConceptualStructureLexiconEntry(object):
 
 
 def eventivity(row):
-    global lcs
-    x = row['lcs_eventive']
+    x = [int(a) for a in row['lcs_eventive']]
     dyn = row['Is.Dynamic']
-    if x.count(x[0]) == len(x):
-        return int(dyn == int(x[0]))
+    if dyn in x:
+        return 1
     else:
-        return dyn
+        return 0
 
 
-lcs = LexicalConceptualStructureLexicon('verbs-English.lcs')
+path = "/Users/venkat/Downloads/LCS/verbs-English.lcs"
+lcs = LexicalConceptualStructureLexicon(path)
 
 # Read annotations
-datafile = "pred_long_data.tsv"
-dev_datafile = "pred_data_dev.tsv"
+datafile = "../../../protocols/data/pred_long_data.tsv"
 response = ["Is.Particular", "Is.Hypothetical", "Is.Dynamic"]
 response_conf = ["Part.Confidence", "Hyp.Confidence", "Dyn.Confidence"]
 attributes = ["part", "hyp", "dyn"]
@@ -115,28 +114,16 @@ data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data[tok
 
 # Split the datasets into train, dev, test
 data_test = data[data['Split'] == 'test']
-data = data[data['Split'] != 'test']
-data = data[data['Split'] != 'dev']
+data_dev = data[data['Split'] == 'dev']
+data = data[data['Split'] == 'train']
 
 # Convert responses to 1s and 0s
 for resp in response:
     data[resp] = data[resp].astype(int)
 
-# convert response confs to logit ridit scores
-for resp in response_conf:
-    data[resp] = data.groupby('Annotator.ID')[resp].apply(lambda x: x.rank() / (len(x) + 1.))
-    data[resp] = np.log(data[resp]) - np.log(1. - data[resp])
+data['lcs_eventive'] = data['Predicate.Lemma'].map(lambda x: lcs.eventive(x) if x in lcs.verbs else -1)
 
-
-dyn_check = data.loc[:, ['Predicate.Lemma', 'Is.Dynamic']]
-
-dyn_check['lcs_eventive'] = dyn_check['Predicate.Lemma'].map(lambda x: lcs.eventive(x) if x in lcs.verbs else -1)
-
-dyn_check = dyn_check[dyn_check['lcs_eventive'] != -1]
-
-dyn_check['compare'] = dyn_check['lcs_eventive'].map(lambda x: 1 if x.count(x[0]) != len(x) else int(x[0]))
-
+dyn_check = data[data['lcs_eventive'] != -1]
 dyn_check['compare'] = dyn_check.apply(lambda row: eventivity(row), axis=1)
+print(len(dyn_check) / len(data))
 print("LCS", sum(dyn_check['compare']) / len(dyn_check))
-
-concreteness = pd.read_csv('concreteness.tsv', sep="\t")

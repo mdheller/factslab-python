@@ -38,7 +38,7 @@ for file in files:
                     feats.append(line.split("\t")[5])
                 else:
                     id += 1
-                    sent_id = file[17:] + " sent_" + str(id)
+                    sent_id = file[23:][:-7] + " sent_" + str(id)
                     feats = " ".join(feats)
                     fout.write(sent_id + "\t" + feats + "\n")
                     words = []
