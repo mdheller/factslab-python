@@ -46,8 +46,11 @@ class Attention_mlp(torch.nn.Module):
                                     regression_hidden_sizes,
                                     output_size) 
         
-        self.attention_map = Parameter(torch.zeros(self.batch_size,
-                                                           self.embedding_size))
+        self.attention_map = Parameter(torch.zeros(1,self.embedding_size))
+
+        #Attention map vector copied for mini-batch size
+        self.attention_map_copied = torch.zeros((self.batch_size, self.embedding_size))
+        self.attention_map_copied[:] = self.attention_map.data
     
     def _run_attention(self, embed_input, return_weights=False):
         '''
@@ -58,7 +61,7 @@ class Attention_mlp(torch.nn.Module):
                 (batch_size x embedding_size)
         '''
         
-        att_raw = torch.bmm(embed_input, self.attention_map[:, :, None])
+        att_raw = torch.bmm(embed_input, self.attention_map_copied[:, :, None])
         att = F.softmax(att_raw.squeeze(), dim=1)
                 
         if return_weights:
