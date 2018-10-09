@@ -65,7 +65,7 @@ class MLPRegression(Module):
         elif self.attention == "Span" or self.attention == "Sentence":
             self.attention_map = Parameter(torch.zeros(1, self.embedding_dim))
         elif self.attention == "Span-param" or self.attention == "Sentence-param":
-            self.attention_map = Parameter(torch.zeros(self.embedding_dim, self.embedding_dim))
+            self.attention_map = Parameter(torch.zeros(1, self.embedding_dim, self.embedding_dim))
 
     def _choose_tokens(self, batch, lengths):
         # Index of the last output for each sequence
@@ -86,18 +86,22 @@ class MLPRegression(Module):
             # No attention. Extract root token
             inputs_for_regression = self._choose_tokens(batch=inputs_embed,
                                                         lengths=tokens)
+
         elif self.attention == "Span" or self.attention == "Sentence":
             att_map = self.attention_map.repeat(batch_size, 1)
-            att_raw = torch.bmm(inputs_embed, att_map)
+            att_raw = torch.bmm(inputs_embed, att_map.unsqueeze(2))
             att = F.softmax(att_raw, dim=0)
+            att = att.view(batch_size, 1, att.shape[1])
             inputs_for_regression = torch.bmm(att, inputs_embed)
+
         elif self.attention == "Span-param" or self.attention == "Sentence-param":
-            att_map = self.attention_map.repeat(batch_size, 1)
-            att_param = torch.bmm(inputs_embed, att_map)
-            att_raw = torch.bmm(att_param, self._choose_tokens(inputs_embed, tokens))
+            # import ipdb; ipdb.set_trace()
+            att_map = self.attention_map.repeat(batch_size, 1, 1)
+            att_param = torch.bmm(self._choose_tokens(inputs_embed, tokens).unsqueeze(1), att_map)
+            att_raw = torch.bmm(att_param, inputs_embed.view(batch_size, self.embedding_dim, inputs_embed.shape[1]))
             att = F.softmax(att_raw, dim=0)
             inputs_for_regression = torch.bmm(att, inputs_embed)
-        return inputs_for_regression
+        return inputs_for_regression.squeeze()
 
     def _run_regression(self, h_in):
         h_out = {}
@@ -114,6 +118,8 @@ class MLPRegression(Module):
     def forward(self, inputs, tokens, attention="None"):
         """Forward propagation of activations"""
 
+        if "param" in self.attention:
+            pass
         inputs_embed = self._get_inputs(inputs)
         tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
         inputs_regression = self._run_attention(inputs_embed, tokens)

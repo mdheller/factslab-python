@@ -44,7 +44,7 @@ parser.add_argument('--span',
 parser.add_argument('--sentence',
                     action='store_true',
                     help='Turn sentence attention on or off')
-parser.add_argument('--paramattention',
+parser.add_argument('--parameterised',
                     action='store_true',
                     help='Turn param attention on or off')
 
@@ -55,7 +55,7 @@ args = parser.parse_args()
 if not args.attention:
     attention_type = "None"
 else:
-    if not args.paramattention:
+    if not args.parameterised:
         if args.span and not args.sentence:
             attention_type = "Span"
         elif args.sentence and not args.span:
