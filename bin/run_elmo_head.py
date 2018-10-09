@@ -7,7 +7,9 @@ from torch.cuda import is_available
 from torch import device
 from allennlp.modules.elmo import Elmo
 from sklearn.utils import shuffle
+from os.path import expanduser
 
+home = expanduser('~')
 # initialize argument parser
 description = 'Run a simple MLP with(out) attention on varying levels on ELMO.'
 parser = argparse.ArgumentParser(description=description)
@@ -17,10 +19,10 @@ parser.add_argument('--protocol',
                     default="noun")
 parser.add_argument('--structures',
                     type=str,
-                    default='../../../protocols/data/structures.tsv')
+                    default=home + '/Desktop/protocols/data/structures.tsv')
 parser.add_argument('--embeddings',
                     type=str,
-                    default='/Users/venkat/Downloads/embeddings/')
+                    default=home + '/Downloads/embeddings/')
 parser.add_argument('--regressiontype',
                     type=str,
                     default="linear")

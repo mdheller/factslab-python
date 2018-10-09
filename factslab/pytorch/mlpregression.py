@@ -49,11 +49,11 @@ class MLPRegression(Module):
             linmap = torch.nn.Linear(last_size, self.output_size)
             linmap = linmap.to(self.device)
             self.lin_maps[attr].append(linmap)
-            varname = '_linear_map' + attr + str(self.layers)
+            varname = '_linear_map' + attr + str(self.layers + 1)
             MLPRegression.__setattr__(self, varname, self.lin_maps[attr][-1])
 
-        self.softmax = torch.nn.Softmax(dim=0)
-        self.logsoftmax = torch.nn.LogSoftmax(dim=1)
+        # self.softmax = torch.nn.Softmax(dim=0)
+        # self.logsoftmax = torch.nn.LogSoftmax(dim=1)
         self.Dropout = Dropout()
 
     def _regression_nonlinearity(self, x):
@@ -107,6 +107,7 @@ class MLPRegression(Module):
                 if i:
                     h_out[attr] = self._regression_nonlinearity(h_out[attr])
                 h_out[attr] = lin_map(h_out[attr])
+                h_out[attr] = self.Dropout(h_out[attr])
             h_out[attr] = h_out[attr].squeeze()
         return h_out
 
@@ -176,6 +177,7 @@ class MLPTrainer:
 
         parameters = [p for p in self._regression.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(parameters)
+        # import ipdb; ipdb.set_trace()
         epoch = 0
         while epoch < self.epochs:
             epoch += 1
@@ -202,8 +204,8 @@ class MLPTrainer:
                 optimizer.step()
 
                 for attr in self.attributes:
-                    targ_trace[attr] += list(y[attr].detach().numpy())
-                    pred_trace[attr] += list(y_[attr].detach().numpy())
+                    targ_trace[attr] += list(y[attr].detach().cpu().numpy())
+                    pred_trace[attr] += list(y_[attr].detach().cpu().numpy())
                 loss_trace.append(float(loss.data))
 
                 if counter % verbosity == 0:
@@ -222,7 +224,6 @@ class MLPTrainer:
 
         # Perform validation run
         dev_preds = self.predict(X=self.dev_x, tokens=self.dev_tokens)
-        import ipdb; ipdb.set_trace()
         if self._continuous:
             sigdig = 3
 
@@ -237,16 +238,16 @@ class MLPTrainer:
                 dev_r2[attr] = r2_score(self.dev_y[attr], dev_preds[attr])
                 dev_mse[attr] = mse(self.dev_y[attr], dev_preds[attr])
                 # Reduce to sig digits
-                train_r2[attr] = np.round(train_r2[attr])
-                train_mse[attr] = np.round(train_mse[attr])
-                dev_r2[attr] = np.round(dev_r2[attr])
-                dev_mse[attr] = np.round(dev_mse[attr])
+                train_r2[attr] = np.round(train_r2[attr], sigdig)
+                train_mse[attr] = np.round(train_mse[attr], sigdig)
+                dev_r2[attr] = np.round(dev_r2[attr], sigdig)
+                dev_mse[attr] = np.round(dev_mse[attr], sigdig)
 
             print(progress + "%" + '\t\t Total loss:\t', np.round(np.mean(loss_trace), sigdig), '\n',
-              ' \t\t R2 on dev:\t', dev_r2, '\n',
-              ' \t\t R2 on train :\t', train_r2, '\n',
-              ' \t\t MSE on dev:\t', dev_mse,
-              ' \t\t MSE on train:\t', train_mse)
+              ' \t\t R2 DEV:\t', dev_r2, '\n',
+              ' \t\t MSE DEV:\t', dev_mse, '\n',
+              ' \t\t R2 TRAIN :\t', train_r2, '\n',
+              ' \t\t MSE TRAIN:\t', train_mse, '\n')
 
     def predict(self, X, tokens):
         """Predict using the LSTM regression
@@ -264,5 +265,5 @@ class MLPTrainer:
 
         predictions_ = {}
         for attr in self.attributes:
-            predictions_[attr] = np.concatenate(np.array([predictions[i][attr].detach().numpy() for i in range(len(predictions))]))
+            predictions_[attr] = np.concatenate(np.array([predictions[i][attr].detach().cpu().numpy() for i in range(len(predictions))]))
         return predictions_
