@@ -151,7 +151,6 @@ class Attention_mlp(torch.nn.Module):
         For a mini-batch, keeps the length of span equal to the length 
         max span in that batch
         '''
-        
         span_lengths = [len(x) for x in span_idxs]
         max_span_len = max(span_lengths)
         
@@ -227,10 +226,7 @@ class Attention_mlp(torch.nn.Module):
 
             return pred1_out, pred2_out
 
-
-        
     def _run_relative_attention(self, inputs, pred1_out, pred2_out):
-
         '''
         Inputs:
         1. inputs: Embeddings of the whole sentence
@@ -254,7 +250,6 @@ class Attention_mlp(torch.nn.Module):
             out = torch.bmm(att[:, None, :], inputs).squeeze()
 
             return out
-
 
     def _preprocess_inputs(self, inputs):
         """Apply some function(s) to the input embeddings
