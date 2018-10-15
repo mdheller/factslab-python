@@ -115,3 +115,28 @@ def ridit(x):
     ridit_map = np.array([cumdist[i - 1] + p / 2 for i, p in enumerate(props)])
 
     return ridit_map[x_shift]
+
+
+def dev_mode_group(group, attributes, response, response_conf, attr_map, attr_conf):
+    '''
+        Takes a group from dev data, and returns the (first) mode answer - with mean confidence if all annotations are same, or by changing the conf of non-mode annotations to 1-conf first, then taking the mean of confidences
+
+        Parameters
+        ----------
+        group
+        attributes
+        response
+        response_conf
+        
+        Returns
+        -------
+        mode_row: pandas Dataframe with just one row 
+    '''
+    mode_row = group.iloc[0]
+    for attr in attributes:
+        if len(group[attr_map[attr] + ".norm"].unique()) != 1:
+            mode_row[attr_map[attr] + ".norm"] = group[attr_map[attr] + ".norm"].mode()[0]
+            group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"] = 1 - group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"]
+        mode_row[attr_conf[attr] + ".norm"] = group[attr_conf[attr] + ".norm"].mean()
+
+    return mode_row
