@@ -117,7 +117,6 @@ class Attention_mlp(torch.nn.Module):
         #Run through relative_temporal type:
         output = self._run_relative_attention(inputs, pred1_out, pred2_out)
 
-        #####.  MLP.  ######
         #run MLP
         output = self._run_regression(output)
 
