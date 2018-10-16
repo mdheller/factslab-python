@@ -1,13 +1,13 @@
-from torch.nn import Parameter, Dropout, Module, Linear
+from torch.nn import Module, Linear
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
 import numpy as np
 from sklearn.metrics import r2_score, mean_squared_error as mse, accuracy_score as acc, f1_score as f1
-from allennlp.modules.elmo import batch_to_ids
 import torch
 import torch.nn.functional as F
 from scipy.stats import mode
 from collections import defaultdict
 from functools import partial
+from os.path import expanduser
 
 
 class MLPRegression(Module):
@@ -40,7 +40,9 @@ class MLPRegression(Module):
             Define the linear maps
         '''
 
-        self.embed_lin_map = Linear(int(self.embedding_dim * 3), int(self.embedding_dim / 4)).to(self.device)
+        self.embed_lin_map_lower = Linear(int(self.embedding_dim), int(self.embedding_dim / 4)).to(self.device)
+        self.embed_lin_map_mid = Linear(int(self.embedding_dim), int(self.embedding_dim / 4), bias=False).to(self.device)
+        self.embed_lin_map_top = Linear(int(self.embedding_dim), int(self.embedding_dim / 4), bias=False).to(self.device)
 
         self.lin_maps = {}
         for attr in self.attributes:
@@ -55,7 +57,7 @@ class MLPRegression(Module):
                 varname = '_linear_map' + attr + str(i)
                 MLPRegression.__setattr__(self, varname, self.lin_maps[attr][-1])
                 last_size = out_size
-            linmap = torch.nn.Linear(last_size, self.output_size)
+            linmap = Linear(last_size, self.output_size)
             linmap = linmap.to(self.device)
             self.lin_maps[attr].append(linmap)
             varname = '_linear_map' + attr + str(self.layers + 1)
@@ -79,13 +81,14 @@ class MLPRegression(Module):
             pass
         else:
             if self.attention == "Span" or self.attention == "Sentence":
-                att_map = torch.empty(1, self.input_size)
+                # att_map = torch.empty(1, self.input_size)
+                self.attention_map = Linear(self.input_size, 1, bias=False).to(self.device)
             elif self.attention == "Span-param" or self.attention == "Sentence-param":
-                att_map = torch.empty(1, self.input_size, self.input_size)
+                self.attention_map = Linear(self.input_size, self.input_size).to(self.device)
             # Intialise weights using Xavier method
-            torch.nn.init.xavier_uniform_(att_map)
-            self.attention_map = Parameter(att_map)
-            self.attention_map.to(self.device)
+            # torch.nn.init.xavier_uniform_(att_map)
+            # self.attention_map = Parameter(att_map)
+            # self.attention_map.to(self.device)
 
     def _choose_tokens(self, batch, lengths):
         # Index of the last output for each sequence
@@ -104,57 +107,46 @@ class MLPRegression(Module):
             for n in range(len(span)):
                 span_batch[m, n, :] = batch[m, span[n], :]
 
+        return span_batch
+
     def _get_inputs(self, words):
         '''Return ELMO embeddings
             Can be done either as a module, or programmatically
 
             If done programmatically, the 3 layer representations are concatenated, then mapped to a lower dimension and squashed with tanh
         '''
-        # indices = batch_to_ids(words)
-        # indices = torch.tensor(indices, dtype=torch.long, device=self.device)
-        # embedded_inputs = self.embeddings(indices)['elmo_representations'][-1]
-
         raw_embeds, _ = self.embeddings.batch_to_embeddings(words)
-        batch_size, layers, timesteps, elmo_dim = raw_embeds.shape
-        raw_embeds_reshape = torch.empty(batch_size, timesteps, elmo_dim * layers).to(self.device)
 
-        # mask = mask.float().to(self.device)
-        # Concatenation
-        for b in range(batch_size):
-            for t in range(timesteps):
-                raw_embeds_reshape[b, t, :] = torch.cat((raw_embeds[b, 0, t, :], raw_embeds[b, 1, t, :], raw_embeds[b, 2, t, :]))
-        embedded_inputs = torch.tanh(self.embed_lin_map(raw_embeds_reshape))
-        # embedded_inputs_mask = torch.empty(batch_size, timesteps, self.input_size).to(self.device)
-        # # Masking
-        # for b in range(batch_size):
-        #     for t in range(timesteps):
-        #         embedded_inputs_mask[b, t, :] = embedded_inputs[b, t, :] * mask[b, t]
-
+        embedded_inputs = torch.tanh(
+            self.embed_lin_map_lower(raw_embeds[:, 0, :, :].squeeze()) +
+            self.embed_lin_map_mid(raw_embeds[:, 1, :, :].squeeze()) +
+            self.embed_lin_map_top(raw_embeds[:, 2, :, :].squeeze()))
         return embedded_inputs
 
-    def _run_attention(self, inputs_embed, tokens, spans=None):
+    def _run_attention(self, inputs_embed, tokens, spans):
 
         batch_size = inputs_embed.shape[0]
+
+        if "Span" in self.attention:
+            inputs_for_attention = self._choose_span(inputs_embed, spans)
+        else:
+            inputs_for_attention = inputs_embed
+
         if self.attention == "None":
             # No attention. Extract root token
-            inputs_for_regression = self._choose_tokens(batch=inputs_embed,
-                                                        lengths=tokens)
+            inputs_for_regression = self._choose_tokens(batch=inputs_for_attention, lengths=tokens)
 
         elif self.attention == "Span" or self.attention == "Sentence":
-            span_inputs_embed = self._choose_span(inputs_embed, spans)
-            att_map = self.attention_map.repeat(batch_size, 1)
-            att_raw = torch.bmm(inputs_embed, att_map.unsqueeze(2))
+            att_raw = self.attention_map(inputs_for_attention)
             att = F.softmax(att_raw, dim=1)
             att = att.view(batch_size, 1, att.shape[1])
-            inputs_for_regression = torch.bmm(att, inputs_embed)
+            inputs_for_regression = torch.bmm(att, inputs_for_attention)
 
         elif self.attention == "Span-param" or self.attention == "Sentence-param":
-            # import ipdb; ipdb.set_trace()
-            att_map = self.attention_map.repeat(batch_size, 1, 1)
-            att_param = torch.bmm(self._choose_tokens(inputs_embed, tokens).unsqueeze(1), att_map)
-            att_raw = torch.bmm(att_param, inputs_embed.view(batch_size, self.embedding_dim, inputs_embed.shape[1]))
+            att_param = torch.tanh(self.attention_map(self._choose_tokens(inputs_embed, tokens)))
+            att_raw = torch.bmm(att_param.unsqueeze(1), inputs_for_attention.view(batch_size, self.input_size, inputs_for_attention.shape[1]))
             att = F.softmax(att_raw, dim=1)
-            inputs_for_regression = torch.bmm(att, inputs_embed)
+            inputs_for_regression = torch.bmm(att, inputs_for_attention)
         return inputs_for_regression.squeeze()
 
     def _run_regression(self, h_in):
@@ -169,7 +161,7 @@ class MLPRegression(Module):
             h_out[attr] = h_out[attr].squeeze()
         return h_out
 
-    def forward(self, inputs, tokens, spans=None):
+    def forward(self, inputs, tokens, spans):
         """Forward propagation of activations"""
 
         inputs_embed = self._get_inputs(inputs)
@@ -188,16 +180,14 @@ class MLPTrainer:
 
     def __init__(self, regressiontype="linear",
                  optimizer_class=torch.optim.Adam,
-                 device="cpu", epochs=1, attributes=["part"],
+                 device="cpu", attributes=["part"],
                  **kwargs):
         self._regressiontype = regressiontype
         self._optimizer_class = optimizer_class
-        self.epochs = epochs
         self.attributes = attributes
         self._init_kwargs = kwargs
         self._continuous = regressiontype != "multinomial"
         self.device = device
-        self.epochs = epochs
 
     def _initialize_trainer_regression(self):
 
@@ -218,11 +208,12 @@ class MLPTrainer:
         self._regression = self._regression.to(self.device)
         self._loss_function = self._loss_function.to(self.device)
 
-    def fit(self, X, Y, loss_wts, tokens, verbosity, dev):
+    def fit(self, X, Y, loss_wts, tokens, spans, verbosity, dev, epochs):
 
         self._X = X
         self._Y = Y
-        self.dev_x, self.dev_y, self.dev_tokens, self.dev_wts = dev
+        self.dev_x, self.dev_y, self.dev_tokens, self.dev_spans, self.dev_wts = dev
+        self.epochs = epochs
 
         self._initialize_trainer_regression()
 
@@ -231,6 +222,7 @@ class MLPTrainer:
         targ_trace = {}
         pred_trace = {}
         loss_wts_trace = {}
+        dev_early = []
         logsft = torch.nn.LogSoftmax(dim=1)
         for attr in self.attributes:
             targ_trace[attr] = []
@@ -246,11 +238,11 @@ class MLPTrainer:
             if verbosity != 0:
                 print("Epoch:", epoch)
                 print("Progress" + "\t Metrics(Unweighted, Weighted)")
-            for x, y, tks, wts in zip(self._X, self._Y, tokens, loss_wts):
+            for x, y, tks, sps, wts in zip(self._X, self._Y, tokens, spans, loss_wts):
                 optimizer.zero_grad()
                 counter += 1
                 losses = {}
-                # import ipdb; ipdb.set_trace()
+
                 tks = torch.tensor(tks, dtype=torch.long, device=self.device)
                 for attr in self.attributes:
                     if self._continuous:
@@ -258,7 +250,7 @@ class MLPTrainer:
                     else:
                         y[attr] = torch.tensor(y[attr], dtype=torch.long, device=self.device)
                     wts[attr] = torch.tensor(wts[attr], dtype=torch.float, device=self.device)
-                y_ = self._regression(inputs=x, tokens=tks)
+                y_ = self._regression(inputs=x, tokens=tks, spans=sps)
 
                 for attr in self.attributes:
                     losses[attr] = self._loss_function(y_[attr], y[attr])
@@ -277,9 +269,9 @@ class MLPTrainer:
                         pred_trace[attr] += list(torch.max(logsft(y_[attr]), 1)[1].detach().cpu().numpy())
                 loss_trace.append(float(loss.data))
 
-                if counter % verbosity == 0 or counter == len(self._X):
+                if counter % verbosity == 0 or counter == len(self._X) or counter == 1:
                     progress = "{:.2f}".format((counter / len(self._X)) * 100)
-                    self._print_metric(progress=progress,
+                    dev_metrics = self._print_metric(progress=progress,
                                        loss_trace=loss_trace,
                                        targ_trace=targ_trace,
                                        pred_trace=pred_trace,
@@ -291,9 +283,21 @@ class MLPTrainer:
                         pred_trace[attr] = []
                         loss_wts_trace[attr] = []
 
+            # EARLY STOPPING
+            # Path = expanduser('~') + "/Desktop/saved_models/"
+            # import ipdb; ipdb.set_trace()
+            # dev_early.append(sum(dev_metrics.values()))
+            # if epoch == 1:
+            #     torch.save(self.state_dict(), Path)
+            # else:
+            #     if dev_early[-1] - dev_early[-2] < 0.1:
+            #         break
+            #     else:
+            #         torch.save(self.state_dict(), Path)
+
     def _print_metric(self, progress, loss_trace, targ_trace, pred_trace, loss_wts_trace=None):
         # Perform validation run
-        dev_preds = self.predict(X=self.dev_x, tokens=self.dev_tokens)
+        dev_preds = self.predict(X=self.dev_x, tokens=self.dev_tokens, spans=self.dev_spans)
         if self._continuous:
             sigdig = 3
 
@@ -313,6 +317,7 @@ class MLPTrainer:
               ' \t\t R2 TRAIN :\t', train_r2, '\n',
               ' \t\t MSE TRAIN:\t', train_mse, '\n')
 
+            return dev_r2
         else:
             sigdig = 3
 
@@ -339,8 +344,10 @@ class MLPTrainer:
               ' \t\t F1 TRAIN :\t', train_f1, '\n',
               ' \t\t ACC TRAIN:\t', train_acc, '\n',
               ' \t\t MODE TRAIN:\t', mode_guess_train, '\n')
+            early_f1 = {k: v[0] for k, v in dev_f1.items()}
+            return early_f1
 
-    def predict(self, X, tokens):
+    def predict(self, X, tokens, spans):
         """Predict using the MLP regression
 
         Parameters
@@ -351,9 +358,9 @@ class MLPTrainer:
         """
         predictions = defaultdict(partial(np.ndarray, 0))
         logsft = torch.nn.LogSoftmax(dim=1)
-        for x, tokens_ in zip(X, tokens):
+        for x, tokens_, spans_ in zip(X, tokens, spans):
             tokens_ = torch.tensor(tokens_, dtype=torch.long, device=self.device)
-            y_dev = self._regression(inputs=x, tokens=tokens_)
+            y_dev = self._regression(inputs=x, tokens=tokens_, spans=spans_)
             # import ipdb; ipdb.set_trace()
             for attr in self.attributes:
                 if self._continuous:

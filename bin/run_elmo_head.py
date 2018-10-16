@@ -35,7 +35,7 @@ if __name__ == "__main__":
                         default="linear")
     parser.add_argument('--epochs',
                         type=int,
-                        default=1)
+                        default=10)
     parser.add_argument('--batch',
                         type=int,
                         default=128)
@@ -78,9 +78,10 @@ if __name__ == "__main__":
         attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
         attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
                  "abs": "Abs.Confidence"}
-        token_col = "Noun.Token"
+        span_col = "Noun.Span"
         root_token = "Noun.Root.Token"
-        dev_cols = ['Unique.ID', token_col, 'Is.Particular.norm', 'Is.Kind.norm', 'Is.Abstract.norm', 'Part.Confidence.norm', 'Kind.Confidence.norm', 'Abs.Confidence.norm']
+        context_col = "Predicate.Context"
+        dev_cols = ['Unique.ID', root_token, span_col, 'Is.Particular.norm', 'Is.Kind.norm', 'Is.Abstract.norm', 'Part.Confidence.norm', 'Kind.Confidence.norm', 'Abs.Confidence.norm']
     else:
         datafile = args.datapath + "pred_long_data.tsv"
         response = ["Is.Particular", "Is.Hypothetical", "Is.Dynamic"]
@@ -89,16 +90,18 @@ if __name__ == "__main__":
         attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
         attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
                  "hyp": "Hyp.Confidence"}
-        token_col = "Pred.Root.Token"
+        span_col = "Pred.Span"
         root_token = "Pred.Root.Token"
-        dev_cols = ['Unique.ID', token_col, 'Is.Particular.norm', 'Is.Dynamic.norm', 'Is.Hypothetical.norm', 'Part.Confidence.norm', 'Dyn.Confidence.norm', 'Hyp.Confidence.norm']
+        context_col = "Argument.Context"
+        dev_cols = ['Unique.ID', root_token, span_col, 'Is.Particular.norm', 'Is.Dynamic.norm', 'Is.Hypothetical.norm', 'Part.Confidence.norm', 'Dyn.Confidence.norm', 'Hyp.Confidence.norm']
 
     data = pd.read_csv(datafile, sep="\t")
 
     data['Split.Sentence.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']), axis=1)
 
-    data['Unique.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x[token_col]), axis=1)
+    data['Unique.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x[root_token]), axis=1)
 
+    data[span_col] = data[span_col].apply(lambda x: [int(a) for a in x.split(',')])
     # Load the structures
     structures = {}
 
@@ -111,9 +114,9 @@ if __name__ == "__main__":
     data['Structure'] = data['Split.Sentence.ID'].map(lambda x: structures[x])
 
     # Split the datasets into train, dev, test
-    data_test = data[data['Split'] == 'test']
-    data_dev = data[data['Split'] == 'dev']
-    data = data[data['Split'] == 'train']
+    data_test = data[data['Split'] == 'test'].reset_index(drop=True)
+    data_dev = data[data['Split'] == 'dev'].reset_index(drop=True)
+    data = data[data['Split'] == 'train'].reset_index(drop=True)
 
     # Ridit scoring annotations and confidence ratings
     for attr in attributes:
@@ -129,9 +132,9 @@ if __name__ == "__main__":
             data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else -1) * data_dev[resp_conf + ".norm"]
 
     # Shuffle the data
-    data = shuffle(data)
-    data_dev = shuffle(data_dev)
-    data_test = shuffle(data_test)
+    data = shuffle(data).reset_index(drop=True)
+    data_dev = shuffle(data_dev).reset_index(drop=True)
+    data_test = shuffle(data_test).reset_index(drop=True)
 
     # ELMO embeddings
     options_file = args.embeddings + "options/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
@@ -147,13 +150,16 @@ if __name__ == "__main__":
     x = [data['Structure'].values.tolist()[i:i + args.batch] for i in range(0, len(data['Structure']), args.batch)]
     x[-1] = x[-1] + x[-2][0:len(x[-2]) - len(x[-1])]
 
-    tokens = [data[token_col].values.tolist()[i:i + args.batch] for i in range(0, len(data[token_col]), args.batch)]
+    tokens = [data[root_token].values.tolist()[i:i + args.batch] for i in range(0, len(data[root_token]), args.batch)]
     tokens[-1] = np.append(tokens[-1], tokens[-2][0:len(tokens[-2]) - len(tokens[-1])])
+
+    spans = [data[span_col].values.tolist()[i:i + args.batch] for i in range(0, len(data[span_col]), args.batch)]
+    spans[-1] = np.append(spans[-1], spans[-2][0:len(spans[-2]) - len(spans[-1])])
 
     y = [{attr: (data[attr_map[attr] + ".norm"].values[i:i + args.batch]) for attr in attributes} for i in range(0, len(data[attr_map[attr] + ".norm"].values), args.batch)]
     y[-1] = {attr: np.append(y[-1][attr], y[-2][attr][0:len(y[-2][attr]) - len(y[-1][attr])]) for attr in attributes}
 
-    loss_wts = [{attr: data[attr_conf[attr] + ".norm"].values[i:i + args.batch] for attr in attributes} for i in range(0, len(data[attr_conf[attr]+ ".norm"].values), args.batch)]
+    loss_wts = [{attr: data[attr_conf[attr] + ".norm"].values[i:i + args.batch] for attr in attributes} for i in range(0, len(data[attr_conf[attr] + ".norm"].values), args.batch)]
     loss_wts[-1] = {attr: np.append(loss_wts[-1][attr], loss_wts[-2][attr][0:len(loss_wts[-2][attr]) - len(loss_wts[-1][attr])]) for attr in attributes}
 
     # Create dev data
@@ -164,12 +170,16 @@ if __name__ == "__main__":
         data_dev_mean = data_dev.groupby('Unique.ID', as_index=False)[dev_cols].apply(lambda x: dev_mode_group(x, attributes, response, response_conf, attr_map, attr_conf)).reset_index(drop=True)
 
     data_dev_mean['Structure'] = data_dev_mean['Unique.ID'].map(lambda x: data_dev[data_dev['Unique.ID'] == x]['Structure'].iloc[0])
+    data_dev_mean['Pred.Tokens'] = data_dev_mean['Unique.ID'].map(lambda x: data_dev[data_dev['Unique.ID'] == x]['Pred.Tokens'].iloc[0])
 
     dev_x = [data_dev_mean['Structure'].values.tolist()[i:i + args.batch] for i in range(0, len(data_dev_mean['Structure']), args.batch)]
     dev_x[-1] = dev_x[-1] + dev_x[-2][0:len(dev_x[-2]) - len(dev_x[-1])]
 
-    dev_tokens = [data_dev_mean[token_col].values.tolist()[i:i + args.batch] for i in range(0, len(data_dev_mean[token_col]), args.batch)]
+    dev_tokens = [data_dev_mean[root_token].values.tolist()[i:i + args.batch] for i in range(0, len(data_dev_mean[root_token]), args.batch)]
     dev_tokens[-1] = np.append(dev_tokens[-1], dev_tokens[-2][0:len(dev_tokens[-2]) - len(dev_tokens[-1])])
+
+    dev_spans = [data_dev_mean[span_col].values.tolist()[i:i + args.batch] for i in range(0, len(data_dev_mean[span_col]), args.batch)]
+    dev_spans[-1] = np.append(dev_spans[-1], dev_spans[-2][0:len(dev_spans[-2]) - len(dev_spans[-1])])
 
     dev_y = {}
     dev_wts = {}
@@ -189,6 +199,6 @@ if __name__ == "__main__":
                          regressiontype=args.regressiontype)
 
     # Training phase
-    trainer.fit(X=x, Y=y, loss_wts=loss_wts, tokens=tokens, verbosity=args.verbosity, dev=[dev_x, dev_y, dev_tokens, dev_wts])
+    trainer.fit(X=x, Y=y, loss_wts=loss_wts, tokens=tokens, spans=spans, verbosity=args.verbosity, dev=[dev_x, dev_y, dev_tokens, dev_spans, dev_wts], epochs=args.epochs)
 
     # Save the model

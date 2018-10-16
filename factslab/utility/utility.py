@@ -92,6 +92,7 @@ def arrange_inputs(data_batch, targets_batch, wts_batch, tokens_batch, attribute
 
         return sorted_data_batch, sorted_targets_batch, sorted_wts_batch, sorted_seq_len_batch, sorted_tokens_batch
 
+
 def ridit(x):
     '''apply ridit scoring
 
@@ -127,10 +128,10 @@ def dev_mode_group(group, attributes, response, response_conf, attr_map, attr_co
         attributes
         response
         response_conf
-        
+
         Returns
         -------
-        mode_row: pandas Dataframe with just one row 
+        mode_row: pandas Dataframe with just one row
     '''
     mode_row = group.iloc[0]
     for attr in attributes:
