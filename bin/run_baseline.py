@@ -8,7 +8,6 @@ from predpatt import load_conllu
 from predpatt import PredPatt
 from predpatt import PredPattOpts
 from os.path import expanduser
-from statistics import median
 from sklearn.model_selection import GridSearchCV
 from collections import Counter
 from factslab.utility import ridit, dev_mode_group
@@ -161,7 +160,7 @@ if __name__ == "__main__":
     for attr in attributes:
         print(attr_map[attr])
         mode_ = data_dev_mean[attr_map[attr] + ".norm"].mode()
-        # Grid search 
+        # Grid search
         loss_wts = data[attr_conf[attr] + ".norm"].values
         print("Accuracy with mode:", np.round(accuracy(dev_y[attr], [mode_ for a in range(len(dev_y[attr]))]), sigdig))
         clf = GridSearchCV(classifier, parameters[attr], return_train_score=True, n_jobs=10, verbose=1, fit_params={'sample_weight': loss_wts})
@@ -169,6 +168,8 @@ if __name__ == "__main__":
 
         for p, tr, trr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score'], clf.cv_results_['mean_train_score']):
             print(p, tr, trr)
-
-        print("Accuracy on DEV")
-        print(clf.score(dev_x, dev_y[attr]))
+        y_pred_dev = clf.predict(dev_x)
+        print("\nDEV Metrics")
+        print("Accuracy:", accuracy(dev_y[attr], y_pred_dev), "\n",
+              "Precision:", precision(dev_y[attr], y_pred_dev), "\n",
+              "Recall:", recall(dev_y[attr], y_pred_dev), "\n\n")
