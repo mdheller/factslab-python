@@ -163,10 +163,10 @@ if __name__ == "__main__":
         # Grid search
         loss_wts = data[attr_conf[attr] + ".norm"].values
         print("Accuracy with mode:", np.round(accuracy(dev_y[attr], [mode_ for a in range(len(dev_y[attr]))]), sigdig))
-        clf = GridSearchCV(classifier, parameters[attr], return_train_score=True, n_jobs=10, verbose=1, fit_params={'sample_weight': loss_wts})
+        clf = GridSearchCV(classifier, parameters[attr], n_jobs=10, verbose=1, fit_params={'sample_weight': loss_wts})
         clf.fit(x, y[attr])
 
-        for p, tr, trr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score'], clf.cv_results_['mean_train_score']):
+        for p, tr, trr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
             print(p, tr, trr)
         y_pred_dev = clf.predict(dev_x)
         print("\nDEV Metrics")
