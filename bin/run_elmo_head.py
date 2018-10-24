@@ -1,16 +1,11 @@
 import argparse
-import numpy as np
-import pandas as pd
-from factslab.utility import ridit, dev_mode_group
+from factslab.utility import read_data, interleave_lists
 from factslab.pytorch.mlpregression import MLPTrainer
 from torch.cuda import is_available
 from torch import device
-# from allennlp.modules.elmo import Elmo
-from allennlp.commands.elmo import ElmoEmbedder
-from sklearn.utils import shuffle
 from os.path import expanduser
+import pickle
 
-pd.set_option('display.max_columns', None)
 
 if __name__ == "__main__":
     home = expanduser('~')
@@ -18,12 +13,6 @@ if __name__ == "__main__":
     description = 'Run a simple MLP with(out) attention of varying types on ELMO.'
     parser = argparse.ArgumentParser(description=description)
 
-    parser.add_argument('--protocol',
-                        type=str,
-                        default="noun")
-    parser.add_argument('--structures',
-                        type=str,
-                        default=home + '/Desktop/protocols/data/structures.tsv')
     parser.add_argument('--datapath',
                         type=str,
                         default=home + '/Desktop/protocols/data/')
@@ -32,173 +21,103 @@ if __name__ == "__main__":
                         default=home + '/Downloads/embeddings/')
     parser.add_argument('--regressiontype',
                         type=str,
-                        default="linear")
+                        default="multinomial")
     parser.add_argument('--epochs',
                         type=int,
                         default=10)
-    parser.add_argument('--batch',
+    parser.add_argument('--batchsize',
                         type=int,
                         default=128)
-    parser.add_argument('--verbosity',
-                        type=int,
-                        default="1")
-    parser.add_argument('--span',
-                        action='store_true',
-                        help='Turn span attention on or off')
-    parser.add_argument('--sentence',
-                        action='store_true',
-                        help='Turn sentence attention on or off')
-    parser.add_argument('--param',
-                        action='store_true',
-                        help='Turn param attention on or off')
+    parser.add_argument('--argrep',
+                        type=str,
+                        default="root",
+                        help='Argument representation- root, span, span-param')
+    parser.add_argument('--predrep',
+                        type=str,
+                        default="root",
+                        help='Predicate representation- root, span, span-param')
+    parser.add_argument('--argcontext',
+                        type=str,
+                        default="none",
+                        help='Argument context - none, david, param')
+    parser.add_argument('--predcontext',
+                        type=str,
+                        default="none",
+                        help='Argument context - none, david, param')
 
     # parse arguments
     args = parser.parse_args()
 
-    # Find out the attention type to be used based on arguments
-    if not args.span and not args.sentence:
-        attention_type = "None"
-    else:
-        if not args.param:
-            if args.span and not args.sentence:
-                attention_type = "Span"
-            elif args.sentence and not args.span:
-                attention_type = "Sentence"
-        else:
-            if args.span and not args.sentence:
-                attention_type = "Span-param"
-            elif args.sentence and not args.span:
-                attention_type = "Sentence-param"
+    # Dictionary storing the configuration of the model
+    model_type = {'arg': {'repr': args.argrep, 'context': args.argcontext},
+                  'pred': {'repr': args.predrep, 'context': args.predcontext}}
 
-    if args.protocol == "noun":
-        datafile = args.datapath + "noun_long_data.tsv"
-        response = ["Is.Particular", "Is.Kind", "Is.Abstract"]
-        response_conf = ["Part.Confidence", "Kind.Confidence", "Abs.Confidence"]
-        attributes = ["part", "kind", "abs"]
-        attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
-        attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
-                 "abs": "Abs.Confidence"}
-        span_col = "Noun.Span"
-        root_token = "Noun.Root.Token"
-        context_col = "Predicate.Context"
-        dev_cols = ['Unique.ID', root_token, span_col, 'Is.Particular.norm', 'Is.Kind.norm', 'Is.Abstract.norm', 'Part.Confidence.norm', 'Kind.Confidence.norm', 'Abs.Confidence.norm']
-    else:
-        datafile = args.datapath + "pred_long_data.tsv"
-        response = ["Is.Particular", "Is.Hypothetical", "Is.Dynamic"]
-        response_conf = ["Part.Confidence", "Hyp.Confidence", "Dyn.Confidence"]
-        attributes = ["part", "hyp", "dyn"]
-        attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
-        attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
-                 "hyp": "Hyp.Confidence"}
-        span_col = "Pred.Span"
-        root_token = "Pred.Root.Token"
-        context_col = "Argument.Context"
-        dev_cols = ['Unique.ID', root_token, span_col, 'Is.Particular.norm', 'Is.Dynamic.norm', 'Is.Hypothetical.norm', 'Part.Confidence.norm', 'Dyn.Confidence.norm', 'Hyp.Confidence.norm']
+    arg_datafile = args.datapath + "arg_long_data.tsv"
+    arg_attributes = ["part", "kind", "abs"]
+    arg_attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
+    arg_attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
+                     "abs": "Abs.Confidence"}
 
-    data = pd.read_csv(datafile, sep="\t")
+    pred_datafile = args.datapath + "pred_long_data.tsv"
+    pred_attributes = ["part", "hyp", "dyn"]
+    pred_attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
+    pred_attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
+                      "hyp": "Hyp.Confidence"}
 
-    data['Split.Sentence.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']), axis=1)
-
-    data['Unique.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x[root_token]), axis=1)
-
-    data[span_col] = data[span_col].apply(lambda x: [int(a) for a in x.split(',')])
-    # Load the structures
+    attributes = {'arg': ['part', 'kind', 'abs'], 'pred': ['part', 'dyn', 'hyp']}
+    # Load the structures/sentences
     structures = {}
-
-    # Don't read_csv the structures file. read_csv can't handle quotes
-    with open(args.structures, 'r') as f:
+    with open(home + '/Desktop/protocols/data/structures.tsv', 'r') as f:
         for line in f.readlines():
             structs = line.split('\t')
             structures[structs[0]] = structs[1].split()
 
-    data['Structure'] = data['Split.Sentence.ID'].map(lambda x: structures[x])
+    arg_stuff = read_data(datafile=arg_datafile,
+                          attributes=arg_attributes,
+                          attr_map=arg_attr_map, attr_conf=arg_attr_conf,
+                          regressiontype=args.regressiontype,
+                          structures=structures, batch_size=args.batchsize)
+    pred_stuff = read_data(datafile=pred_datafile,
+                           attributes=pred_attributes, attr_map=pred_attr_map,
+                           attr_conf=pred_attr_conf,
+                           regressiontype=args.regressiontype,
+                           structures=structures, batch_size=args.batchsize)
 
-    # Split the datasets into train, dev, test
-    data_test = data[data['Split'] == 'test'].reset_index(drop=True)
-    data_dev = data[data['Split'] == 'dev'].reset_index(drop=True)
-    data = data[data['Split'] == 'train'].reset_index(drop=True)
+    train_data = []
+    dev_data = {'arg': None, 'pred': None}
+    dev_data['arg'] = arg_stuff[1]
+    dev_data['pred'] = pred_stuff[1]
+    for ij in range(len(arg_stuff[0])):
+        train_data.append(interleave_lists(arg_stuff[0][ij], pred_stuff[0][ij]))
+    with open("train_stuff.pkl", "wb") as arg_out, open("dev_stuff.pkl", "wb") as pred_out:
+        pickle.dump(train_data, arg_out)
+        pickle.dump(dev_data, pred_out)
+    import sys; sys.exit()
+    train_in = open("train_stuff.pkl", "rb")
+    dev_in = open("dev_stuff.pkl", "rb")
+    train_data = pickle.load(train_in)
+    dev_data = pickle.load(dev_in)
+    train_in.close()
+    dev_in.close()
 
-    # Ridit scoring annotations and confidence ratings
-    for attr in attributes:
-        resp = attr_map[attr]
-        resp_conf = attr_conf[attr]
-        data[resp_conf + ".norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
-        data_dev[resp_conf + ".norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
-        if args.regressiontype == "multinomial":
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
-        elif args.regressiontype == "linear":
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else -1) * data[resp_conf + ".norm"]
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else -1) * data_dev[resp_conf + ".norm"]
-
-    # Shuffle the data
-    data = shuffle(data).reset_index(drop=True)
-    data_dev = shuffle(data_dev).reset_index(drop=True)
-    data_test = shuffle(data_test).reset_index(drop=True)
-
-    # ELMO embeddings
+    # ELMO parameters
     options_file = args.embeddings + "options/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
     weight_file = args.embeddings + "weights/elmo_2x4096_512_2048cnn_2xhighway_5.5B_weights.hdf5"
-    elmo = ElmoEmbedder(options_file, weight_file, cuda_device=0)
-    # elmo = Elmo(options_file, weight_file, 2)
+    elmo_params = (options_file, weight_file)
 
     # pyTorch figures out device to do computation on
     device_to_use = device("cuda:0" if is_available() else "cpu")
 
-    # Prepare all the inputs
-
-    x = [data['Structure'].values.tolist()[i:i + args.batch] for i in range(0, len(data['Structure']), args.batch)]
-    x[-1] = x[-1] + x[-2][0:len(x[-2]) - len(x[-1])]
-
-    tokens = [data[root_token].values.tolist()[i:i + args.batch] for i in range(0, len(data[root_token]), args.batch)]
-    tokens[-1] = np.append(tokens[-1], tokens[-2][0:len(tokens[-2]) - len(tokens[-1])])
-
-    spans = [data[span_col].values.tolist()[i:i + args.batch] for i in range(0, len(data[span_col]), args.batch)]
-    spans[-1] = np.append(spans[-1], spans[-2][0:len(spans[-2]) - len(spans[-1])])
-
-    y = [{attr: (data[attr_map[attr] + ".norm"].values[i:i + args.batch]) for attr in attributes} for i in range(0, len(data[attr_map[attr] + ".norm"].values), args.batch)]
-    y[-1] = {attr: np.append(y[-1][attr], y[-2][attr][0:len(y[-2][attr]) - len(y[-1][attr])]) for attr in attributes}
-
-    loss_wts = [{attr: data[attr_conf[attr] + ".norm"].values[i:i + args.batch] for attr in attributes} for i in range(0, len(data[attr_conf[attr] + ".norm"].values), args.batch)]
-    loss_wts[-1] = {attr: np.append(loss_wts[-1][attr], loss_wts[-2][attr][0:len(loss_wts[-2][attr]) - len(loss_wts[-1][attr])]) for attr in attributes}
-
-    # Create dev data
-
-    if args.regressiontype == "linear":
-        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False)[dev_cols].mean()
-    else:
-        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False)[dev_cols].apply(lambda x: dev_mode_group(x, attributes, response, response_conf, attr_map, attr_conf)).reset_index(drop=True)
-
-    data_dev_mean['Structure'] = data_dev_mean['Unique.ID'].map(lambda x: data_dev[data_dev['Unique.ID'] == x]['Structure'].iloc[0])
-    data_dev_mean['Pred.Tokens'] = data_dev_mean['Unique.ID'].map(lambda x: data_dev[data_dev['Unique.ID'] == x]['Pred.Tokens'].iloc[0])
-
-    dev_x = [data_dev_mean['Structure'].values.tolist()[i:i + args.batch] for i in range(0, len(data_dev_mean['Structure']), args.batch)]
-    dev_x[-1] = dev_x[-1] + dev_x[-2][0:len(dev_x[-2]) - len(dev_x[-1])]
-
-    dev_tokens = [data_dev_mean[root_token].values.tolist()[i:i + args.batch] for i in range(0, len(data_dev_mean[root_token]), args.batch)]
-    dev_tokens[-1] = np.append(dev_tokens[-1], dev_tokens[-2][0:len(dev_tokens[-2]) - len(dev_tokens[-1])])
-
-    dev_spans = [data_dev_mean[span_col].values.tolist()[i:i + args.batch] for i in range(0, len(data_dev_mean[span_col]), args.batch)]
-    dev_spans[-1] = np.append(dev_spans[-1], dev_spans[-2][0:len(dev_spans[-2]) - len(dev_spans[-1])])
-
-    dev_y = {}
-    dev_wts = {}
-    for attr in attributes:
-        dev_y[attr] = [data_dev_mean[attr_map[attr] + ".norm"].values[i:i + args.batch] for i in range(0, len(data_dev_mean[attr_map[attr] + ".norm"].values), args.batch)]
-        dev_y[attr][-1] = np.append(dev_y[attr][-1], dev_y[attr][-2][0:len(dev_y[attr][-2]) - len(dev_y[attr][-1])])
-        dev_wts[attr] = [data_dev_mean[attr_conf[attr] + ".norm"].values[i:i + args.batch] for i in range(0, len(data_dev_mean[attr_conf[attr] + ".norm"].values), args.batch)]
-        dev_wts[attr][-1] = np.append(dev_wts[attr][-1], dev_wts[attr][-2][0:len(dev_wts[attr][-2]) - len(dev_wts[attr][-1])])
-
-    for attr in attributes:
-        dev_y[attr] = np.concatenate(dev_y[attr], axis=None)
-        dev_wts[attr] = np.concatenate(dev_wts[attr], axis=None)
-
     # Initialise the model
-    trainer = MLPTrainer(embeddings=elmo, device=device_to_use,
-                         attributes=attributes, attention=attention_type,
-                         regressiontype=args.regressiontype)
+    trainer = MLPTrainer(embed_params=elmo_params, all_attrs=attributes,
+                         device=device_to_use, attention_type=model_type)
 
+    # Now to prepare all the damn inputs
+
+    x, y, tokens, spans, context_roots, context_spans, loss_wts = train_data
     # Training phase
-    trainer.fit(X=x, Y=y, loss_wts=loss_wts, tokens=tokens, spans=spans, verbosity=args.verbosity, dev=[dev_x, dev_y, dev_tokens, dev_spans, dev_wts], epochs=args.epochs)
+    trainer.fit(X=x, Y=y, loss_wts=loss_wts, tokens=tokens, spans=spans,
+                context_roots=context_roots, context_spans=context_spans,
+                dev=dev_data, epochs=args.epochs)
 
     # Save the model

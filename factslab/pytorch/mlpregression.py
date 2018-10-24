@@ -7,106 +7,121 @@ import torch.nn.functional as F
 from scipy.stats import mode
 from collections import defaultdict
 from functools import partial
+from allennlp.commands.elmo import ElmoEmbedder
 from os.path import expanduser
 
 
 class MLPRegression(Module):
-    def __init__(self, attributes, embeddings, embedding_dim=1024,
-                 output_size=1, layers=2, device=False, batch_first=True,
-                 attention="None"):
-        '''Define functional components of network with trainable params'''
+    def __init__(self, embed_params, attention_type, all_attrs,
+                 embedding_dim=1024, output_size=3, layers=2, device="cpu",
+                 batch_first=True):
+        '''
+            Super class for training
+        '''
         super(MLPRegression, self).__init__()
 
-        # set model hyperparameters
+        # Set model constants and embeddings
         self.device = device
         self.layers = layers
         self.batch_first = batch_first
         self.embedding_dim = embedding_dim
-        self.input_size = int(self.embedding_dim / 4)
+        self.regr_input = int(self.embedding_dim / 4)
         self.output_size = output_size
-        self.attributes = attributes
-        self.attention = attention
-        # Initialise ELMO embeddings
-        self.embeddings = embeddings
+        self.attention_type = attention_type
+        self.all_attributes = all_attrs
+        # Initialise embeddings
+        self.embeddings = self._init_embeddings(embed_params)
 
-        # Initialise regression layers
+        # Initialise regression layers and parameters
         self._init_regression()
 
-        # Initialise attention
-        self._init_attention(self.attention)
+        # Initialise attention parameters
+        self._init_attention()
+
+    def _init_embeddings(self, elmo_params):
+        options_file = elmo_params[0]
+        weight_file = elmo_params[1]
+        elmo = ElmoEmbedder(options_file, weight_file)
+        return elmo
 
     def _init_regression(self):
         '''
             Define the linear maps
         '''
 
-        self.embed_lin_map_lower = Linear(int(self.embedding_dim), int(self.embedding_dim / 4)).to(self.device)
-        self.embed_lin_map_mid = Linear(int(self.embedding_dim), int(self.embedding_dim / 4), bias=False).to(self.device)
-        self.embed_lin_map_top = Linear(int(self.embedding_dim), int(self.embedding_dim / 4), bias=False).to(self.device)
+        # ELMO tuning parameters
+        self.embed_lin_map_lower = Linear(int(self.embedding_dim), int(self.embedding_dim / 4))
+        self.embed_lin_map_mid = Linear(int(self.embedding_dim), int(self.embedding_dim / 4), bias=False)
+        self.embed_lin_map_top = Linear(int(self.embedding_dim), int(self.embedding_dim / 4), bias=False)
 
-        self.lin_maps = {}
-        for attr in self.attributes:
-            self.lin_maps[attr] = []
-        for attr in self.attributes:
-            last_size = self.input_size
-            for i in range(1, self.layers + 1):
-                out_size = int(last_size / (i * 4))
-                linmap = Linear(last_size, out_size)
-                linmap = linmap.to(self.device)
-                self.lin_maps[attr].append(linmap)
-                varname = '_linear_map' + attr + str(i)
-                MLPRegression.__setattr__(self, varname, self.lin_maps[attr][-1])
-                last_size = out_size
-            linmap = Linear(last_size, self.output_size)
-            linmap = linmap.to(self.device)
-            self.lin_maps[attr].append(linmap)
-            varname = '_linear_map' + attr + str(self.layers + 1)
-            MLPRegression.__setattr__(self, varname, self.lin_maps[attr][-1])
-
-        # self.softmax = torch.nn.Softmax(dim=0)
-        # self.logsoftmax = torch.nn.LogSoftmax(dim=1)
-        # self.Dropout = Dropout()
+        # Output regression parameters
+        self.lin_maps = {'arg': {}, 'pred': {}}
+        for prot in self.all_attributes.keys():
+            for attr in self.all_attributes[prot]:
+                self.lin_maps[prot][attr] = []
+            for attr in self.all_attributes[prot]:
+                last_size = self.regr_input
+                for i in range(1, self.layers + 1):
+                    out_size = int(last_size / (i * 4))
+                    linmap = Linear(last_size, out_size)
+                    self.lin_maps[prot][attr].append(linmap)
+                    varname = '_linear_map' + prot + attr + str(i)
+                    MLPRegression.__setattr__(self, varname, self.lin_maps[prot][attr][-1])
+                    last_size = out_size
+                linmap = Linear(last_size, self.output_size)
+                self.lin_maps[prot][attr].append(linmap)
+                varname = '_linear_map' + prot + attr + str(self.layers + 1)
+                MLPRegression.__setattr__(self, varname, self.lin_maps[prot][attr][-1])
 
     def _regression_nonlinearity(self, x):
         return F.relu(x)
 
-    def _init_attention(self, attention_type):
+    def _init_attention(self):
         '''
             Initialises the attention map vector/matrix
 
             Takes attention_type-Span, Sentence, Span-param, Sentence-param
             as a parameter to decide the size of the attention matrix
         '''
-        if self.attention == "None":
-            pass
-        else:
-            if self.attention == "Span" or self.attention == "Sentence":
-                # att_map = torch.empty(1, self.input_size)
-                self.attention_map = Linear(self.input_size, 1, bias=False).to(self.device)
-            elif self.attention == "Span-param" or self.attention == "Sentence-param":
-                self.attention_map = Linear(self.input_size, self.input_size).to(self.device)
-            # Intialise weights using Xavier method
-            # torch.nn.init.xavier_uniform_(att_map)
-            # self.attention_map = Parameter(att_map)
-            # self.attention_map.to(self.device)
+
+        self.attention_map_repr = {}
+        self.attention_map_context = {}
+        for prot in self.attention_type.keys():
+            if self.attention_type[prot]['repr'] == "span":
+                self.attention_map_repr[prot] = Linear(self.regr_input, 1)
+                varname = '_att_map_' + prot + "_repr"
+                MLPRegression.__setattr__(self, varname, self.attention_map_repr[prot])
+            elif self.attention_type[prot]['repr'] == "span-param":
+                self.attention_map_repr[prot] = Linear(self.regr_input, self.regr_input)
+                varname = '_att_map_' + prot + "_repr"
+                MLPRegression.__setattr__(self, varname, self.attention_map_repr[prot])
+            # Context attention
+            if self.attention_type[prot]['context'] == "david":
+                if prot == "pred":
+                    self.attention_map_context[prot] = Linear(self.regr_input, self.regr_input)
+                    varname = '_att_map_' + prot + "_context_david"
+                    MLPRegression.__setattr__(self, varname, self.attention_map_.context[prot])
+            elif self.attention_type[prot]['context'] == "param":
+                self.attention_map_context[prot] = Linear(self.regr_input, self.regr_input)
+                varname = '_att_map_' + prot + "_context_param"
+                MLPRegression.__setattr__(self, varname, self.attention_map_context[prot])
 
     def _choose_tokens(self, batch, lengths):
         # Index of the last output for each sequence
         idx = (lengths).view(-1, 1).expand(batch.size(0), batch.size(2)).unsqueeze(1)
         return batch.gather(1, idx).squeeze()
 
-    def _choose_span(self, batch, spans):
+    def _choose_span_context(self, batch, spans):
         '''
-            Extract spans from the given batch
+            Extract spans/contexts from the given batch
         '''
         batch_size, _, _ = batch.shape
         max_span = max([len(i) for i in spans])
-        span_batch = torch.zeros((batch_size, max_span, self.input_size), dtype=torch.float, device=self.device)
+        span_batch = torch.zeros((batch_size, max_span, self.regr_input), dtype=torch.float)
         for m in range(batch_size):
             span = spans[m]
             for n in range(len(span)):
                 span_batch[m, n, :] = batch[m, span[n], :]
-
         return span_batch
 
     def _get_inputs(self, words):
@@ -123,50 +138,106 @@ class MLPRegression(Module):
             self.embed_lin_map_top(raw_embeds[:, 2, :, :].squeeze()))
         return embedded_inputs
 
-    def _run_attention(self, inputs_embed, tokens, spans):
+    def _get_representation(self, prot, embeddings, tokens, spans):
+        '''
+            returns the representation required from arguments passed by
+            running attention based on arguments passed
+        '''
 
-        batch_size = inputs_embed.shape[0]
+        batch_size = embeddings.shape[0]
+        # Get token(pred/arg) representation
+        rep_type = self.attention_type[prot]['repr']
 
-        if "Span" in self.attention:
-            inputs_for_attention = self._choose_span(inputs_embed, spans)
-        else:
-            inputs_for_attention = inputs_embed
-
-        if self.attention == "None":
-            # No attention. Extract root token
-            inputs_for_regression = self._choose_tokens(batch=inputs_for_attention, lengths=tokens)
-
-        elif self.attention == "Span" or self.attention == "Sentence":
-            att_raw = self.attention_map(inputs_for_attention)
+        if rep_type == "root":
+            token_rep = self._choose_tokens(batch=embeddings, lengths=tokens)
+        elif rep_type == "Span":
+            token_rep_raw = self._choose_span_context(embeddings, spans)
+            att_raw = self.attention_map_repr[prot](token_rep_raw)
             att = F.softmax(att_raw, dim=1)
             att = att.view(batch_size, 1, att.shape[1])
-            inputs_for_regression = torch.bmm(att, inputs_for_attention)
-
-        elif self.attention == "Span-param" or self.attention == "Sentence-param":
-            att_param = torch.tanh(self.attention_map(self._choose_tokens(inputs_embed, tokens)))
-            att_raw = torch.bmm(att_param.unsqueeze(1), inputs_for_attention.view(batch_size, self.input_size, inputs_for_attention.shape[1]))
+            token_rep = torch.bmm(att, token_rep_raw)
+        elif rep_type == "Span-param":
+            token_rep_raw = self._choose_span_context(embeddings, spans)
+            att_param = torch.tanh(self.attention_map_repr[prot](self._choose_tokens(embeddings, tokens)))
+            att_raw = torch.bmm(att_param.unsqueeze(1), token_rep_raw.view(batch_size, self.regr_input, token_rep_raw.shape[1]))
             att = F.softmax(att_raw, dim=1)
-            inputs_for_regression = torch.bmm(att, inputs_for_attention)
-        return inputs_for_regression.squeeze()
+            token_rep = torch.bmm(att, token_rep_raw)
 
-    def _run_regression(self, h_in):
+        return token_rep
+
+    def _run_attention(self, prot, embeddings, tokens, spans, context_roots, context_spans):
+        '''
+            Various attention mechanisms implemented
+        '''
+
+        batch_size = embeddings.shape[0]
+
+        # Get the required representation for pred/arg
+        token_rep = self._get_representation(prot=prot,
+                                             embeddings=embeddings,
+                                             tokens=tokens,
+                                             spans=spans)
+        # Concatenate root to representation
+        for prot in self.all_attributes.keys():
+            if self.attention_type[prot]['repr'] != "root":
+                token_rep = torch.cat(token_rep, self._choose_tokens(batch=embeddings, lengths=tokens))
+        # Get the required representation for context of pred/arg
+        context_type = self.attention_type[prot]['context']
+
+        if context_type == "none":
+            context_rep = None
+        elif context_type == "param":
+            sentence_rep = embeddings
+            att_param = torch.tanh(self.attention_map_context[prot](token_rep))
+            att_raw = torch.bmm(att_param.unsqueeze(1), sentence_rep.view(batch_size, self.regr_input, sentence_rep.shape[1]))
+            att = F.softmax(att_raw, dim=1)
+            context_rep = torch.bmm(att, sentence_rep)
+        elif context_type == "david":
+            prot_context = ['arg', 'pred'].remove(prot)[0]
+            if prot == "arg":
+                context_rep = self._get_representation(
+                    prot=prot_context, embeddings=embeddings,
+                    tokens=context_roots, spans=context_spans)
+            else:
+                context_rep_args = []
+                for c_root, c_span in zip(context_roots, context_spans):
+                    context_rep_args.append(self._get_representation(
+                        prot=prot_context, embeddings=embeddings,
+                        tokens=c_root, spans=c_span))
+                context_rep_args = torch.stack(context_rep_args, dim=0)
+                att_context_param = torch.tanh(self.attention_map_context[prot](token_rep))
+                att_raw = torch.bmm(att_context_param.unsqueeze(1), context_rep_args.view(batch_size, self.regr_input, context_rep_args.shape[1]))
+                att = F.softmax(att_raw, dim=1)
+                context_rep = torch.bmm(att, token_rep)
+
+        if context_rep is not None:
+            inputs_for_regression = torch.cat(token_rep, context_rep)
+        else:
+            inputs_for_regression = token_rep
+
+        return inputs_for_regression
+
+    def _run_regression(self, prot, h_in):
         h_out = {}
-        for attr in self.attributes:
+        for attr in self.all_attributes[prot]:
             h_out[attr] = h_in
-            for i, lin_map in enumerate(self.lin_maps[attr]):
+            for i, lin_map in enumerate(self.lin_maps[prot][attr]):
                 if i:
                     h_out[attr] = self._regression_nonlinearity(h_out[attr])
                 h_out[attr] = lin_map(h_out[attr])
-                # h_out[attr] = self.Dropout(h_out[attr])
             h_out[attr] = h_out[attr].squeeze()
         return h_out
 
-    def forward(self, inputs, tokens, spans):
+    def forward(self, prot, inputs, tokens, spans, context_roots,
+                context_spans):
         """Forward propagation of activations"""
 
-        inputs_embed = self._get_inputs(inputs)
-        inputs_regression = self._run_attention(inputs_embed, tokens, spans)
-        outputs = self._run_regression(inputs_regression)
+        inputs_for_attention = self._get_inputs(inputs)
+        inputs_for_regression = self._run_attention(prot, inputs_for_attention,
+                                                    tokens, spans,
+                                                    context_roots,
+                                                    context_spans)
+        outputs = self._run_regression(prot, inputs_for_regression)
 
         return outputs
 
@@ -178,81 +249,83 @@ class MLPTrainer:
                          "robust_smooth": SmoothL1Loss,
                          "multinomial": CrossEntropyLoss}
 
-    def __init__(self, regressiontype="linear",
+    def __init__(self, regressiontype="multinomial",
                  optimizer_class=torch.optim.Adam,
-                 device="cpu", attributes=["part"],
-                 **kwargs):
+                 device="cpu", **kwargs):
+        '''
+
+        '''
         self._regressiontype = regressiontype
         self._optimizer_class = optimizer_class
-        self.attributes = attributes
         self._init_kwargs = kwargs
         self._continuous = regressiontype != "multinomial"
         self.device = device
 
     def _initialize_trainer_regression(self):
+        '''
 
+        '''
         lf_class = self.__class__.loss_function_map[self._regressiontype]
         if self._continuous:
             self._regression = MLPRegression(device=self.device,
-                                             attributes=self.attributes,
                                              **self._init_kwargs)
             self._loss_function = lf_class()
         else:
-            output_size = np.unique(self._Y[0][self.attributes[0]]).shape[0]
+            output_size = 3
             self._regression = MLPRegression(output_size=output_size,
                                              device=self.device,
-                                             attributes=self.attributes,
                                              **self._init_kwargs)
             self._loss_function = lf_class(reduction="none")
 
         self._regression = self._regression.to(self.device)
         self._loss_function = self._loss_function.to(self.device)
 
-    def fit(self, X, Y, loss_wts, tokens, spans, verbosity, dev, epochs):
+    def fit(self, X, Y, loss_wts, tokens, spans, context_roots, context_spans,
+            dev, epochs):
+        '''
+            Fit X
+        '''
 
-        self._X = X
-        self._Y = Y
-        self.dev_x, self.dev_y, self.dev_tokens, self.dev_spans, self.dev_wts = dev
+        # Load the dev_data
+        dev_x, dev_y, dev_tokens, dev_spans, dev_context_roots, dev_context_spans, dev_wts = [{}, {}, {}, {}, {}, {}, {}]
+        for prot in ['arg', 'pred']:
+            dev_x[prot], dev_y[prot], dev_tokens[prot], dev_spans[prot], dev_context_roots[prot], dev_context_spans[prot], dev_wts[prot] = dev[prot]
         self.epochs = epochs
 
         self._initialize_trainer_regression()
 
         y_ = []
         loss_trace = []
-        targ_trace = {}
-        pred_trace = {}
-        loss_wts_trace = {}
-        dev_early = []
-        logsft = torch.nn.LogSoftmax(dim=1)
-        for attr in self.attributes:
-            targ_trace[attr] = []
-            pred_trace[attr] = []
-            loss_wts_trace[attr] = []
 
         parameters = [p for p in self._regression.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(parameters)
         epoch = 0
         while epoch < self.epochs:
             epoch += 1
-            counter = 0
-            if verbosity != 0:
-                print("Epoch:", epoch)
-                print("Progress" + "\t Metrics(Unweighted, Weighted)")
-            for x, y, tks, sps, wts in zip(self._X, self._Y, tokens, spans, loss_wts):
+            for x, y, tks, sps, ctks, csps, wts in zip(X, Y, tokens, spans, context_roots, context_spans, loss_wts):
+                print("hello")
+                if 'hyp' in list(y.keys()):
+                    prot = "pred"
+                else:
+                    prot = "arg"
+                attributes = list(y.keys())
                 optimizer.zero_grad()
-                counter += 1
                 losses = {}
 
                 tks = torch.tensor(tks, dtype=torch.long, device=self.device)
-                for attr in self.attributes:
+
+                for attr in attributes:
                     if self._continuous:
                         y[attr] = torch.tensor(y[attr], dtype=torch.float, device=self.device)
                     else:
                         y[attr] = torch.tensor(y[attr], dtype=torch.long, device=self.device)
                     wts[attr] = torch.tensor(wts[attr], dtype=torch.float, device=self.device)
-                y_ = self._regression(inputs=x, tokens=tks, spans=sps)
 
-                for attr in self.attributes:
+                y_ = self._regression(prot=prot, inputs=x, tokens=tks,
+                                      spans=sps, context_roots=ctks,
+                                      context_spans=csps)
+
+                for attr in attributes:
                     losses[attr] = self._loss_function(y_[attr], y[attr])
                     if not self._continuous:
                         losses[attr] = torch.mm(losses[attr].unsqueeze(0), wts[attr].unsqueeze(1)).squeeze() / len(losses[attr])
@@ -260,94 +333,74 @@ class MLPTrainer:
                 loss.backward()
                 optimizer.step()
 
-                for attr in self.attributes:
-                    targ_trace[attr] += list(y[attr].detach().cpu().numpy())
-                    loss_wts_trace[attr] += list(wts[attr].detach().cpu().numpy())
-                    if self._continuous:
-                        pred_trace[attr] += list(y_[attr].detach().cpu().numpy())
-                    else:
-                        pred_trace[attr] += list(torch.max(logsft(y_[attr]), 1)[1].detach().cpu().numpy())
                 loss_trace.append(float(loss.data))
 
-                if counter % verbosity == 0 or counter == len(self._X) or counter == 1:
-                    progress = "{:.2f}".format((counter / len(self._X)) * 100)
-                    dev_metrics = self._print_metric(progress=progress,
-                                       loss_trace=loss_trace,
-                                       targ_trace=targ_trace,
-                                       pred_trace=pred_trace,
-                                       loss_wts_trace=loss_wts_trace)
-                    y_ = []
-                    loss_trace = []
-                    for attr in self.attributes:
-                        targ_trace[attr] = []
-                        pred_trace[attr] = []
-                        loss_wts_trace[attr] = []
-
             # EARLY STOPPING
-            # Path = expanduser('~') + "/Desktop/saved_models/"
-            # import ipdb; ipdb.set_trace()
-            # dev_early.append(sum(dev_metrics.values()))
-            # if epoch == 1:
-            #     torch.save(self.state_dict(), Path)
-            # else:
-            #     if dev_early[-1] - dev_early[-2] < 0.1:
-            #         break
-            #     else:
-            #         torch.save(self.state_dict(), Path)
+            # Perform validation run
+            dev_preds = {}
+            for prot in ['arg', 'pred']:
+                dev_preds[prot] = self.predict(X=dev_x[prot],
+                                               Y=dev_y[prot],
+                                               tokens=dev_tokens[prot],
+                                               spans=dev_spans[prot],
+                                               context_roots=dev_context_roots[prot],
+                                               context_spans=dev_context_spans[prot])
+            progress = "{:.2f}".format((epoch / self.epochs) * 100)
+            print("Epoch:", epoch)
+            print("Progress" + "\t Metrics(Unweighted, Weighted)")
+            self._print_metric(progress=progress,
+                               loss_trace=loss_trace,
+                               dev_preds=dev_preds,
+                               dev_y=dev_y,
+                               dev_wts=dev_wts)
+            y_ = []
+            loss_trace = []
 
-    def _print_metric(self, progress, loss_trace, targ_trace, pred_trace, loss_wts_trace=None):
-        # Perform validation run
-        dev_preds = self.predict(X=self.dev_x, tokens=self.dev_tokens, spans=self.dev_spans)
+            name_of_model = "somename"
+            Path = expanduser('~') + "/Desktop/saved_models/" + name_of_model
+            torch.save(self.state_dict(), Path)
+
+    def _print_metric(self, progress, loss_trace, targ_trace, pred_trace, loss_wts_trace, dev_preds, dev_y, dev_wts):
+        '''
+
+        '''
         if self._continuous:
             sigdig = 3
 
-            train_r2 = {}
-            train_mse = {}
             dev_r2 = {}
             dev_mse = {}
-            for attr in self.attributes:
-                train_r2[attr] = (np.round(r2_score(targ_trace[attr], pred_trace[attr]), sigdig), np.round(r2_score(targ_trace[attr], pred_trace[attr], sample_weight=loss_wts_trace[attr]), sigdig))
-                train_mse[attr] = (np.round(mse(targ_trace[attr], pred_trace[attr]), sigdig), np.round(mse(targ_trace[attr], pred_trace[attr], sample_weight=loss_wts_trace[attr]), sigdig))
-                dev_r2[attr] = (np.round(r2_score(self.dev_y[attr], dev_preds[attr]), sigdig), np.round(r2_score(self.dev_y[attr], dev_preds[attr], sample_weight=self.dev_wts[attr]), sigdig))
-                dev_mse[attr] = (np.round(mse(self.dev_y[attr], dev_preds[attr]), sigdig), np.round(mse(self.dev_y[attr], dev_preds[attr], sample_weight=self.dev_wts[attr]), sigdig))
+            attributes = list(dev_y[0].keys())
+            for attr in attributes:
+                dev_r2[attr] = (np.round(r2_score(dev_y[attr], dev_preds[attr]), sigdig), np.round(r2_score(dev_y[attr], dev_preds[attr], sample_weight=dev_wts[attr]), sigdig))
+                dev_mse[attr] = (np.round(mse(dev_y[attr], dev_preds[attr]), sigdig), np.round(mse(dev_y[attr], dev_preds[attr], sample_weight=dev_wts[attr]), sigdig))
 
             print(progress + "%" + '\t\t Total loss:\t', np.round(np.mean(loss_trace), sigdig), '\n',
               ' \t\t R2 DEV:\t', dev_r2, '\n',
-              ' \t\t MSE DEV:\t', dev_mse, '\n',
-              ' \t\t R2 TRAIN :\t', train_r2, '\n',
-              ' \t\t MSE TRAIN:\t', train_mse, '\n')
+              ' \t\t MSE DEV:\t', dev_mse, '\n')
 
             return dev_r2
         else:
             sigdig = 3
+            print(progress + "%" + '\t\t Total loss:\t', np.round(np.mean(loss_trace), sigdig), '\n')
+            for prot in ['arg', 'pred']:
+                dev_f1 = {}
+                dev_acc = {}
+                mode_guess_dev = {}
+                attributes = list(dev_y[prot][0].keys())
+                for attr in attributes:
+                    dev_f1[attr] = (np.round(f1(dev_y[prot][attr], dev_preds[prot][attr]), sigdig), np.round(f1(dev_y[prot][attr], dev_preds[prot][attr], sample_weight=dev_wts[prot][attr]), sigdig))
+                    dev_acc[attr] = (np.round(acc(dev_y[prot][attr], dev_preds[prot][attr]), sigdig), np.round(acc(dev_y[prot][attr], dev_preds[prot][attr], sample_weight=dev_wts[prot][attr]), sigdig))
+                    mode_dev = mode(dev_y[prot][attr])
+                    mode_guess_dev[attr] = (np.round(acc(dev_y[prot][attr], [mode_dev[0] for i in range(len(dev_y[prot][attr]))]), sigdig), np.round(acc(dev_y[prot][attr], [mode_dev[0] for i in range(len(dev_y[prot][attr]))], sample_weight=dev_wts[prot][attr]), sigdig))
 
-            train_f1 = {}
-            train_acc = {}
-            dev_f1 = {}
-            dev_acc = {}
-            mode_guess_dev = {}
-            mode_guess_train = {}
-            for attr in self.attributes:
-                train_f1[attr] = (np.round(f1(targ_trace[attr], pred_trace[attr]), sigdig), np.round(f1(targ_trace[attr], pred_trace[attr], sample_weight=loss_wts_trace[attr]), sigdig))
-                train_acc[attr] = (np.round(acc(targ_trace[attr], pred_trace[attr]), sigdig), np.round(acc(targ_trace[attr], pred_trace[attr], sample_weight=loss_wts_trace[attr]), sigdig))
-                dev_f1[attr] = (np.round(f1(self.dev_y[attr], dev_preds[attr]), sigdig), np.round(f1(self.dev_y[attr], dev_preds[attr], sample_weight=self.dev_wts[attr]), sigdig))
-                dev_acc[attr] = (np.round(acc(self.dev_y[attr], dev_preds[attr]), sigdig), np.round(acc(self.dev_y[attr], dev_preds[attr], sample_weight=self.dev_wts[attr]), sigdig))
-                mode_dev = mode(self.dev_y[attr])
-                mode_guess_dev[attr] = (np.round(acc(self.dev_y[attr], [mode_dev[0] for i in range(len(self.dev_y[attr]))]), sigdig), np.round(acc(self.dev_y[attr], [mode_dev[0] for i in range(len(self.dev_y[attr]))], sample_weight=self.dev_wts[attr]), sigdig))
-                mode_train = mode(targ_trace[attr])
-                mode_guess_train[attr] = (np.round(acc(targ_trace[attr], [mode_train[0] for i in range(len(targ_trace[attr]))]), sigdig), np.round(acc(targ_trace[attr], [mode_train[0] for i in range(len(targ_trace[attr]))], sample_weight=loss_wts_trace[attr]), sigdig))
+                print('\t\t', prot, '\n',
+                  ' \t\t MODE DEV:\t', mode_guess_dev, '\n',
+                  ' \t\t F1 DEV:\t', dev_f1, '\n',
+                  ' \t\t ACC DEV:\t', dev_acc, '\n')
+            # early_f1 = {k: v[0] for k, v in dev_f1.items()}
+            # return early_f1
 
-            print(progress + "%" + '\t\t Total loss:\t', np.round(np.mean(loss_trace), sigdig), '\n',
-              ' \t\t F1 DEV:\t', dev_f1, '\n',
-              ' \t\t ACC DEV:\t', dev_acc, '\n',
-              ' \t\t MODE DEV:\t', mode_guess_dev, '\n',
-              ' \t\t F1 TRAIN :\t', train_f1, '\n',
-              ' \t\t ACC TRAIN:\t', train_acc, '\n',
-              ' \t\t MODE TRAIN:\t', mode_guess_train, '\n')
-            early_f1 = {k: v[0] for k, v in dev_f1.items()}
-            return early_f1
-
-    def predict(self, X, tokens, spans):
+    def predict(self, X, Y, tokens, spans, context_roots, context_spans):
         """Predict using the MLP regression
 
         Parameters
@@ -358,11 +411,19 @@ class MLPTrainer:
         """
         predictions = defaultdict(partial(np.ndarray, 0))
         logsft = torch.nn.LogSoftmax(dim=1)
-        for x, tokens_, spans_ in zip(X, tokens, spans):
+        for x, y, tokens_, spans_, ctx_root, ctx_span in zip(X, Y, tokens, spans, context_roots, context_spans):
+            if 'hyp' in list(y[0].keys()):
+                prot = "pred"
+            else:
+                prot = "arg"
+            attributes = list(y[0].keys())
+
             tokens_ = torch.tensor(tokens_, dtype=torch.long, device=self.device)
-            y_dev = self._regression(inputs=x, tokens=tokens_, spans=spans_)
+            y_dev = self._regression(prot=prot, inputs=x, tokens=tokens_,
+                                     spans=spans_, context_roots=ctx_root,
+                                     context_spans=ctx_span)
             # import ipdb; ipdb.set_trace()
-            for attr in self.attributes:
+            for attr in attributes:
                 if self._continuous:
                     predictions[attr] = np.concatenate([predictions[attr], y_dev[attr].detach().cpu().numpy()])
                 else:
