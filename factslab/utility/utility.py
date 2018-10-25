@@ -183,8 +183,8 @@ def read_data(datafile, attributes, attr_map, attr_conf, regressiontype,
         data[resp_conf + ".norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
         data_dev[resp_conf + ".norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
         if regressiontype == "multinomial":
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
+            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else -1)
+            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else -1)
         elif regressiontype == "linear":
             data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else -1) * data[resp_conf + ".norm"]
             data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else -1) * data_dev[resp_conf + ".norm"]

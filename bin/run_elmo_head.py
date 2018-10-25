@@ -66,33 +66,33 @@ if __name__ == "__main__":
 
     attributes = {'arg': ['part', 'kind', 'abs'], 'pred': ['part', 'dyn', 'hyp']}
     # Load the structures/sentences
-    structures = {}
-    with open(home + '/Desktop/protocols/data/structures.tsv', 'r') as f:
-        for line in f.readlines():
-            structs = line.split('\t')
-            structures[structs[0]] = structs[1].split()
+    # structures = {}
+    # with open(home + '/Desktop/protocols/data/structures.tsv', 'r') as f:
+    #     for line in f.readlines():
+    #         structs = line.split('\t')
+    #         structures[structs[0]] = structs[1].split()
 
-    arg_stuff = read_data(datafile=arg_datafile,
-                          attributes=arg_attributes,
-                          attr_map=arg_attr_map, attr_conf=arg_attr_conf,
-                          regressiontype=args.regressiontype,
-                          structures=structures, batch_size=args.batchsize)
-    pred_stuff = read_data(datafile=pred_datafile,
-                           attributes=pred_attributes, attr_map=pred_attr_map,
-                           attr_conf=pred_attr_conf,
-                           regressiontype=args.regressiontype,
-                           structures=structures, batch_size=args.batchsize)
+    # arg_stuff = read_data(datafile=arg_datafile,
+    #                       attributes=arg_attributes,
+    #                       attr_map=arg_attr_map, attr_conf=arg_attr_conf,
+    #                       regressiontype=args.regressiontype,
+    #                       structures=structures, batch_size=args.batchsize)
+    # pred_stuff = read_data(datafile=pred_datafile,
+    #                        attributes=pred_attributes, attr_map=pred_attr_map,
+    #                        attr_conf=pred_attr_conf,
+    #                        regressiontype=args.regressiontype,
+    #                        structures=structures, batch_size=args.batchsize)
 
-    train_data = []
-    dev_data = {'arg': None, 'pred': None}
-    dev_data['arg'] = arg_stuff[1]
-    dev_data['pred'] = pred_stuff[1]
-    for ij in range(len(arg_stuff[0])):
-        train_data.append(interleave_lists(arg_stuff[0][ij], pred_stuff[0][ij]))
-    with open("train_stuff.pkl", "wb") as arg_out, open("dev_stuff.pkl", "wb") as pred_out:
-        pickle.dump(train_data, arg_out)
-        pickle.dump(dev_data, pred_out)
-    import sys; sys.exit()
+    # train_data = []
+    # dev_data = {'arg': None, 'pred': None}
+    # dev_data['arg'] = arg_stuff[1]
+    # dev_data['pred'] = pred_stuff[1]
+    # for ij in range(len(arg_stuff[0])):
+    #     train_data.append(interleave_lists(arg_stuff[0][ij], pred_stuff[0][ij]))
+    # with open("train_stuff.pkl", "wb") as arg_out, open("dev_stuff.pkl", "wb") as pred_out:
+    #     pickle.dump(train_data, arg_out)
+    #     pickle.dump(dev_data, pred_out)
+
     train_in = open("train_stuff.pkl", "rb")
     dev_in = open("dev_stuff.pkl", "rb")
     train_data = pickle.load(train_in)
