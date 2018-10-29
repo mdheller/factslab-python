@@ -10,11 +10,14 @@ from functools import partial
 from allennlp.commands.elmo import ElmoEmbedder
 from os.path import expanduser
 from tqdm import tqdm
+from graphviz import Digraph
+from torch.autograd import Variable
+from torchviz import make_dot
 
 
 class MLPRegression(Module):
     def __init__(self, embed_params, attention_type, all_attrs, device="cpu",
-                 embedding_dim=1024, output_size=3, layers=2):
+                 embedding_dim=1024, output_size=3, layers=1):
         '''
             Super class for training
         '''
@@ -49,9 +52,9 @@ class MLPRegression(Module):
         '''
 
         # ELMO tuning parameters
-        self.embed_lin_map_lower = Linear(self.embedding_dim, self.reduced_embedding_dim)
-        self.embed_lin_map_mid = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
-        self.embed_lin_map_top = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
+        self.embed_linmap_argpred_lower = Linear(self.embedding_dim, self.reduced_embedding_dim)
+        self.embed_linmap_argpred_mid = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
+        self.embed_linmap_argpred_top = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
 
         # Output regression parameters
         self.lin_maps = ModuleDict({'arg': ModuleList([]),
@@ -68,21 +71,14 @@ class MLPRegression(Module):
                     regr_input[prot] *= 2
                 else:
                     regr_input[prot] *= 3
-            for attr in self.all_attributes[prot]:
-                self.lin_maps[prot] = []
-            for attr in self.all_attributes[prot]:
-                last_size = regr_input[prot]
-                for i in range(1, self.layers + 1):
-                    out_size = int(last_size / (i * 4))
-                    linmap = Linear(last_size, out_size)
-                    self.lin_maps[prot][attr].append(linmap)
-                    varname = '_linear_map' + prot + attr + str(i)
-                    MLPRegression.__setattr__(self, varname, self.lin_maps[prot][attr][-1])
-                    last_size = out_size
-                linmap = Linear(last_size, self.output_size)
-                self.lin_maps[prot][attr].append(linmap)
-                varname = '_linear_map' + prot + attr + str(self.layers + 1)
-                MLPRegression.__setattr__(self, varname, self.lin_maps[prot][attr][-1])
+            last_size = regr_input[prot]
+            for i in range(1, self.layers + 1):
+                out_size = int(last_size / (i * 4))
+                linmap = Linear(last_size, out_size)
+                self.lin_maps[prot].append(linmap)
+                last_size = out_size
+            linmap = Linear(last_size, self.output_size)
+            self.lin_maps[prot].append(linmap)
 
     def _regression_nonlinearity(self, x):
         return F.relu(x)
@@ -95,37 +91,28 @@ class MLPRegression(Module):
             as a parameter to decide the size of the attention matrix
         '''
 
-        self.attention_map_repr = {}
-        self.attention_map_context = {}
+        self.attention_map_repr = ModuleDict({})
+        self.attention_map_context = ModuleDict({})
         for prot in self.attention_type.keys():
             # Token representation
             if self.attention_type[prot]['repr'] == "span":
                 self.attention_map_repr[prot] = Linear(self.reduced_embedding_dim, 1, bias=False)
-                varname = '_att_map_' + prot + "_repr"
-                MLPRegression.__setattr__(self, varname, self.attention_map_repr[prot])
             elif self.attention_type[prot]['repr'] == "param":
                 self.attention_map_repr[prot] = Linear(self.reduced_embedding_dim, self.reduced_embedding_dim)
-                varname = '_att_map_' + prot + "_repr"
-                MLPRegression.__setattr__(self, varname, self.attention_map_repr[prot])
 
-            # Context attention
+            # Context representation
             if self.attention_type[prot]['repr'] in ["span", "param"]:
-                repr_dim = self.reduced_embedding_dim
+                repr_dim = 2 * self.reduced_embedding_dim
             else:
                 repr_dim = self.reduced_embedding_dim
             if self.attention_type[prot]['context'] == "david":
                 if prot == "pred":
                     self.attention_map_context[prot] = Linear(repr_dim, repr_dim)
-                    varname = '_att_map_' + prot + "_context_david"
-                    MLPRegression.__setattr__(self, varname, self.attention_map_context[prot])
             elif self.attention_type[prot]['context'] == "param":
-                self.attention_map_context[prot] = Linear(repr_dim, repr_dim)
-                varname = '_att_map_' + prot + "_context_param"
-                MLPRegression.__setattr__(self, varname, self.attention_map_context[prot])
+                self.attention_map_context[prot] = Linear(repr_dim, self.reduced_embedding_dim)
 
     def _choose_tokens(self, batch, lengths):
         # Index of the last output for each sequence
-        import ipdb; ipdb.set_trace()  # breakpoint b59781ab //
         idx = (lengths).view(-1, 1).expand(batch.size(0), batch.size(2)).unsqueeze(1)
         return batch.gather(1, idx).squeeze()
 
@@ -133,13 +120,14 @@ class MLPRegression(Module):
         '''
             Extract spans/contexts from the given batch
         '''
-        batch_size, _, _ = batch.shape
-        max_span = max([len(i) for i in spans])
-        span_batch = torch.zeros((batch_size, max_span, self.reduced_embedding_dim), dtype=torch.float, device=self.device)
-        for m in range(batch_size):
-            span = spans[m]
-            for n in range(len(span)):
-                span_batch[m, n, :] = batch[m, span[n], :]
+
+        span_batch = []
+        for i, span in enumerate(spans):
+            span_repr = batch[i, span[0], :].unsqueeze(0)
+            if len(span) > 1:
+                for m in range(1, len(span)):
+                    span_repr = torch.cat((span_repr, batch[i, span[m], :].unsqueeze(0)), dim=0)
+            span_batch.append(span_repr)
         return span_batch
 
     def _get_inputs(self, words):
@@ -149,10 +137,11 @@ class MLPRegression(Module):
             If done programmatically, the 3 layer representations are concatenated, then mapped to a lower dimension and squashed with tanh
         '''
         raw_embeds, masks = self.embeddings.batch_to_embeddings(words)
+        masks = masks.unsqueeze(2).repeat(1, 1, self.reduced_embedding_dim).float()
         embedded_inputs = torch.tanh(
-            self.embed_lin_map_lower(raw_embeds[:, 0, :, :].squeeze()) +
-            self.embed_lin_map_mid(raw_embeds[:, 1, :, :].squeeze()) +
-            self.embed_lin_map_top(raw_embeds[:, 2, :, :].squeeze()))
+            self.embed_linmap_argpred_lower(raw_embeds[:, 0, :, :].squeeze()) +
+            self.embed_linmap_argpred_mid(raw_embeds[:, 1, :, :].squeeze()) +
+            self.embed_linmap_argpred_top(raw_embeds[:, 2, :, :].squeeze()))
         masked_embedded_inputs = embedded_inputs * masks
         return masked_embedded_inputs
 
@@ -162,24 +151,26 @@ class MLPRegression(Module):
             running attention based on arguments passed
         '''
 
-        batch_size = embeddings.shape[0]
         # Get token(pred/arg) representation
         rep_type = self.attention_type[prot]['repr']
 
         if rep_type == "root":
             token_rep = self._choose_tokens(batch=embeddings, lengths=tokens)
-        elif rep_type == "span":
-            token_rep_raw = self._choose_span_context(embeddings, spans)
-            att_raw = self.attention_map_repr[prot](token_rep_raw)
-            att = F.softmax(att_raw, dim=1)
-            att = att.view(batch_size, 1, att.shape[1])
-            token_rep = torch.bmm(att, token_rep_raw)
-        elif rep_type == "param":
-            token_rep_raw = self._choose_span_context(embeddings, spans)
-            att_param = torch.tanh(self.attention_map_repr[prot](self._choose_tokens(embeddings, tokens)))
-            att_raw = torch.bmm(att_param.unsqueeze(1), token_rep_raw.view(batch_size, self.reduced_embedding_dim, token_rep_raw.shape[1]))
-            att = F.softmax(att_raw, dim=1)
-            token_rep = torch.bmm(att, token_rep_raw)
+        else:
+            spans_rep_raw = self._choose_span_context(embeddings, spans)
+            for i, span_rep_raw in enumerate(spans_rep_raw):
+                if rep_type == "span":
+                    att_raw = self.attention_map_repr[prot](span_rep_raw)
+                    att_raw = att_raw.view(att_raw.shape[1], att_raw.shape[0])
+                elif rep_type == "param":
+                    att_param = torch.tanh(self.attention_map_repr[prot](self._choose_tokens(embeddings[i, :, :].unsqueeze(0), tokens[i]))).unsqueeze(0)
+                    att_raw = torch.mm(att_param, span_rep_raw.view(self.reduced_embedding_dim, span_rep_raw.shape[0]))
+                att = F.softmax(att_raw, dim=1)
+                span_rep = torch.mm(att, span_rep_raw)
+                if i:
+                    token_rep = torch.cat((token_rep, span_rep), dim=0)
+                else:
+                    token_rep = span_rep
 
         return token_rep
 
@@ -198,9 +189,10 @@ class MLPRegression(Module):
                                              spans=spans)
         # Concatenate root to representation
         if self.attention_type[prot]['repr'] != "root":
-            token_rep = torch.cat((pure_token_rep, self._choose_tokens(batch=embeddings, lengths=tokens).unsqueeze(1)), dim=2)
+            token_rep = torch.cat((pure_token_rep, self._choose_tokens(batch=embeddings, lengths=tokens)), dim=1)
         else:
             token_rep = pure_token_rep
+
         # Get the required representation for context of pred/arg
         context_type = self.attention_type[prot]['context']
 
@@ -208,10 +200,10 @@ class MLPRegression(Module):
             context_rep = None
         elif context_type == "param":
             sentence_rep = embeddings
-            att_param = torch.tanh(self.attention_map_context[prot](pure_token_rep))
-            att_raw = torch.bmm(att_param.unsqueeze(1), sentence_rep.view(batch_size, self.reduced_embedding_dim, sentence_rep.shape[1]))
-            att = F.softmax(att_raw, dim=1)
-            context_rep = torch.bmm(att, sentence_rep)
+            att_param = torch.tanh(self.attention_map_context[prot](token_rep)).unsqueeze(1)
+            att_raw = torch.bmm(att_param, sentence_rep.view(batch_size, self.reduced_embedding_dim, sentence_rep.shape[1]))
+            att = F.softmax(att_raw.squeeze(), dim=1)
+            context_rep = torch.bmm(att.unsqueeze(1), sentence_rep)
         elif context_type == "david":
             if prot == 'arg':
                 prot_context = 'pred'
@@ -219,42 +211,69 @@ class MLPRegression(Module):
                 prot_context = 'arg'
 
             if prot == "arg":
+                context_roots = torch.tensor(context_roots, dtype=torch.long, device=self.device)
                 context_rep = self._get_representation(
                     prot=prot_context, embeddings=embeddings,
                     tokens=context_roots, spans=context_spans)
             else:
-                context_rep_args = []
-                for ind in range(len(context_roots)):
-                    c_roots = torch.tensor(context_roots[ind], dtype=torch.long, device=self.device).unsqueeze(0)
-                    c_span = context_roots[ind]
-                    embed_sent = embeddings[ind, :, :].unsqueeze(0)
-                    c_rep_args = self._get_representation(
-                        prot=prot_context, embeddings=embed_sent,
-                        tokens=c_roots, spans=c_span)
-                    context_rep_args = torch.stack(context_rep_args, dim=0)
-                    att_context_param = torch.tanh(self.attention_map_context[prot](token_rep))
-                    att_raw = torch.bmm(att_context_param.unsqueeze(1), context_rep_args.view(batch_size, self.reduced_embedding_dim, context_rep_args.shape[1]))
+                context_rep = None
+                for i, context_root in enumerate(context_roots):
+                    ctx_reps = None
+                    context_root = torch.tensor(context_root, dtype=torch.long, device=self.device).unsqueeze(0)
+                    context_span = context_spans[i]
+                    sentence = embeddings[i, :, :].unsqueeze(0)
+                    for j in range(len(context_span)):
+                        ctx_root = context_root[:, j].unsqueeze(1)
+                        ctx_span = [context_span[j]]
+                        ctx_rep = self._get_representation(
+                            prot=prot_context, embeddings=sentence,
+                            tokens=ctx_root, spans=ctx_span)
+                        # # Concatenate root to representation
+                        # if self.attention_type[prot_context]['repr'] != "root":
+                        #     ctx_rep = torch.cat((ctx_rep, self._choose_tokens(batch=sentence, lengths=ctx_root).unsqueeze(0)), dim=1)
+
+                        if j:
+                            ctx_reps = torch.cat((ctx_reps, ctx_rep), dim=0)
+                        else:
+                            ctx_reps = ctx_rep
+
+                    # Attention over arguments
+                    att_nd_param = torch.tanh(self.attention_map_context[prot](token_rep[i, :].unsqueeze(0)))
+                    att_raw = torch.mm(att_nd_param, ctx_reps.view(ctx_reps.shape[1], ctx_reps.shape[0]))
                     att = F.softmax(att_raw, dim=1)
-                    context_rep = torch.bmm(att, token_rep)
+                    ctx_rep_final = torch.mm(att, ctx_reps)
+                    if i:
+                        context_rep = torch.cat((context_rep, ctx_rep_final), dim=0).squeeze()
+                    else:
+                        context_rep = ctx_rep_final
 
         if context_rep is not None:
-            inputs_for_regression = torch.cat((token_rep, context_rep.squeeze()), dim=1)
+            inputs_for_regression = torch.cat((token_rep.squeeze(), context_rep.squeeze()), dim=1)
         else:
             inputs_for_regression = token_rep
 
         return inputs_for_regression
 
     def _run_regression(self, prot, h_in):
-        h_out = {}
-        for attr in self.all_attributes[prot]:
-            h_out[attr] = h_in
-            for i, lin_map in enumerate(self.lin_maps[prot][attr]):
-                if i:
-                    h_out[attr] = self._regression_nonlinearity(h_out[attr])
-                h_out[attr] = lin_map(h_out[attr])
-            h_out[attr] = h_out[attr].squeeze()
-            h_out[attr] = torch.sigmoid(h_out[attr])
-        return h_out
+        '''
+            Run regression to get 3 attribute vector
+        '''
+        h_out = h_in
+        for i, lin_map in enumerate(self.lin_maps[prot]):
+            if i:
+                h_out = self._regression_nonlinearity(h_out)
+            import ipdb; ipdb.set_trace()  # breakpoint edf138af //
+            h_out = lin_map(h_out)
+
+        h_out = torch.sigmoid(h_out).squeeze()
+        # Now add another dimension with 1 - probability for False
+        h_out = h_out.unsqueeze(2).repeat(1, 1, 2)
+        h_out[:, :, 1] = 1 - h_out[:, :, 1]
+
+        final_h = {}
+        for i, attr in enumerate(self.all_attributes[prot]):
+            final_h[attr] = h_out[:, i, :]
+        return final_h
 
     def forward(self, prot, inputs, tokens, spans, context_roots,
                 context_spans):
@@ -278,7 +297,8 @@ class MLPTrainer:
                          "multinomial": CrossEntropyLoss}
 
     def __init__(self, attention_type, regressiontype="multinomial",
-                 optimizer_class=torch.optim.Adam, device="cpu", **kwargs):
+                 optimizer_class=torch.optim.Adam, device="cpu",
+                 lr=0.001, weight_decay=0, **kwargs):
         '''
 
         '''
@@ -288,6 +308,9 @@ class MLPTrainer:
         self._continuous = regressiontype != "multinomial"
         self.device = device
         self.att_type = attention_type
+
+        self.lr = lr
+        self.weight_decay = weight_decay
 
     def _initialize_trainer_regression(self):
         '''
@@ -299,7 +322,7 @@ class MLPTrainer:
                                              **self._init_kwargs)
             self._loss_function = lf_class()
         else:
-            output_size = 2
+            output_size = 3
             self._regression = MLPRegression(output_size=output_size,
                                              device=self.device,
                                              attention_type=self.att_type,
@@ -327,7 +350,7 @@ class MLPTrainer:
         early_stop_acc = [0]
 
         parameters = [p for p in self._regression.parameters() if p.requires_grad]
-        optimizer = torch.optim.Adam(parameters)
+        optimizer = torch.optim.Adam(parameters, weight_decay=self.weight_decay, lr=self.lr)
         epoch = 0
         while epoch < epochs:
             epoch += 1
@@ -351,13 +374,16 @@ class MLPTrainer:
                 y_ = self._regression(prot=prot, inputs=x, tokens=tks,
                                       spans=sps, context_roots=ctks,
                                       context_spans=csps)
-
+                # make_dot(y_['part'], params=dict(self._regression.named_parameters())).view()
                 for attr in attributes:
                     losses[attr] = self._loss_function(y_[attr], y[attr])
                     if not self._continuous:
                         losses[attr] = torch.mm(losses[attr].unsqueeze(0), wts[attr].unsqueeze(1)).squeeze() / len(losses[attr])
                 loss = sum(losses.values())
                 loss.backward()
+                # for name, param in self._regression.named_parameters():
+                #     if prot in name:
+                #         print(name, param.grad.data.sum())
                 optimizer.step()
 
                 loss_trace.append(float(loss.data))

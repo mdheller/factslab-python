@@ -25,6 +25,12 @@ if __name__ == "__main__":
     parser.add_argument('--epochs',
                         type=int,
                         default=10)
+    parser.add_argument('--lr',
+                        type=float,
+                        default=0.001)
+    parser.add_argument('--wd',
+                        type=float,
+                        default=0)
     parser.add_argument('--batchsize',
                         type=int,
                         default=128)
@@ -110,7 +116,8 @@ if __name__ == "__main__":
 
     # Initialise the model
     trainer = MLPTrainer(embed_params=elmo_params, all_attrs=attributes,
-                         device=device_to_use, attention_type=model_type)
+                         device=device_to_use, attention_type=model_type,
+                         lr=args.lr, weight_decay=args.wd)
 
     # Now to prepare all the damn inputs
 
