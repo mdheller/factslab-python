@@ -18,7 +18,7 @@ if __name__ == "__main__":
                         default=home + '/Desktop/protocols/data/')
     parser.add_argument('--embeddings',
                         type=str,
-                        default=home + '/Downloads/embeddings/')
+                        default='/srv/models/pytorch/elmo/')
     parser.add_argument('--regressiontype',
                         type=str,
                         default="multinomial")
@@ -36,19 +36,19 @@ if __name__ == "__main__":
                         default=128)
     parser.add_argument('--argrep',
                         type=str,
-                        default="root",
+                        default="param",
                         help='Argument representation- root, span, span-param')
     parser.add_argument('--predrep',
                         type=str,
-                        default="root",
+                        default="param",
                         help='Predicate representation- root, span, span-param')
     parser.add_argument('--argcontext',
                         type=str,
-                        default="none",
+                        default="david",
                         help='Argument context - none, david, param')
     parser.add_argument('--predcontext',
                         type=str,
-                        default="none",
+                        default="david",
                         help='Argument context - none, david, param')
 
     # parse arguments

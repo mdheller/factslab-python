@@ -107,7 +107,7 @@ class MLPRegression(Module):
                 repr_dim = self.reduced_embedding_dim
             if self.attention_type[prot]['context'] == "david":
                 if prot == "pred":
-                    self.attention_map_context[prot] = Linear(repr_dim, repr_dim)
+                    self.attention_map_context[prot] = Linear(repr_dim, int(repr_dim / 2))
             elif self.attention_type[prot]['context'] == "param":
                 self.attention_map_context[prot] = Linear(repr_dim, self.reduced_embedding_dim)
 
@@ -120,7 +120,6 @@ class MLPRegression(Module):
         '''
             Extract spans/contexts from the given batch
         '''
-
         span_batch = []
         for i, span in enumerate(spans):
             span_repr = batch[i, span[0], :].unsqueeze(0)
@@ -138,7 +137,7 @@ class MLPRegression(Module):
         '''
         raw_embeds, masks = self.embeddings.batch_to_embeddings(words)
         masks = masks.unsqueeze(2).repeat(1, 1, self.reduced_embedding_dim).float()
-        embedded_inputs = torch.tanh(
+        embedded_inputs = (
             self.embed_linmap_argpred_lower(raw_embeds[:, 0, :, :].squeeze()) +
             self.embed_linmap_argpred_mid(raw_embeds[:, 1, :, :].squeeze()) +
             self.embed_linmap_argpred_top(raw_embeds[:, 2, :, :].squeeze()))
@@ -182,6 +181,7 @@ class MLPRegression(Module):
         batch_size = embeddings.shape[0]
 
         tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
+
         # Get the required representation for pred/arg
         pure_token_rep = self._get_representation(prot=prot,
                                              embeddings=embeddings,
@@ -228,9 +228,6 @@ class MLPRegression(Module):
                         ctx_rep = self._get_representation(
                             prot=prot_context, embeddings=sentence,
                             tokens=ctx_root, spans=ctx_span)
-                        # # Concatenate root to representation
-                        # if self.attention_type[prot_context]['repr'] != "root":
-                        #     ctx_rep = torch.cat((ctx_rep, self._choose_tokens(batch=sentence, lengths=ctx_root).unsqueeze(0)), dim=1)
 
                         if j:
                             ctx_reps = torch.cat((ctx_reps, ctx_rep), dim=0)
@@ -262,7 +259,6 @@ class MLPRegression(Module):
         for i, lin_map in enumerate(self.lin_maps[prot]):
             if i:
                 h_out = self._regression_nonlinearity(h_out)
-            import ipdb; ipdb.set_trace()  # breakpoint edf138af //
             h_out = lin_map(h_out)
 
         h_out = torch.sigmoid(h_out).squeeze()
@@ -278,7 +274,6 @@ class MLPRegression(Module):
     def forward(self, prot, inputs, tokens, spans, context_roots,
                 context_spans):
         """Forward propagation of activations"""
-
         inputs_for_attention = self._get_inputs(inputs)
         inputs_for_regression = self._run_attention(prot, inputs_for_attention,
                                                     tokens, spans,
@@ -374,18 +369,18 @@ class MLPTrainer:
                 y_ = self._regression(prot=prot, inputs=x, tokens=tks,
                                       spans=sps, context_roots=ctks,
                                       context_spans=csps)
-                # make_dot(y_['part'], params=dict(self._regression.named_parameters())).view()
+                # make_dot(y_['part'].mean(), params=dict(self._regression.named_parameters()))
+
                 for attr in attributes:
                     losses[attr] = self._loss_function(y_[attr], y[attr])
                     if not self._continuous:
                         losses[attr] = torch.mm(losses[attr].unsqueeze(0), wts[attr].unsqueeze(1)).squeeze() / len(losses[attr])
+
                 loss = sum(losses.values())
                 loss.backward()
                 # for name, param in self._regression.named_parameters():
-                #     if prot in name:
-                #         print(name, param.grad.data.sum())
+                #     print(name, param.grad.data.sum())
                 optimizer.step()
-
                 loss_trace.append(float(loss.data))
 
             # EARLY STOPPING
