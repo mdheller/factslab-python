@@ -36,19 +36,19 @@ if __name__ == "__main__":
                         default=128)
     parser.add_argument('--argrep',
                         type=str,
-                        default="param",
+                        default="root",
                         help='Argument representation- root, span, span-param')
     parser.add_argument('--predrep',
                         type=str,
-                        default="param",
+                        default="root",
                         help='Predicate representation- root, span, span-param')
     parser.add_argument('--argcontext',
                         type=str,
-                        default="david",
+                        default="none",
                         help='Argument context - none, david, param')
     parser.add_argument('--predcontext',
                         type=str,
-                        default="david",
+                        default="none",
                         help='Argument context - none, david, param')
 
     # parse arguments
@@ -71,7 +71,9 @@ if __name__ == "__main__":
                       "hyp": "Hyp.Confidence"}
 
     attributes = {'arg': ['part', 'kind', 'abs'], 'pred': ['part', 'dyn', 'hyp']}
+
     # Load the structures/sentences
+
     # structures = {}
     # with open(home + '/Desktop/protocols/data/structures.tsv', 'r') as f:
     #     for line in f.readlines():
@@ -98,7 +100,7 @@ if __name__ == "__main__":
     # with open("train_stuff.pkl", "wb") as arg_out, open("dev_stuff.pkl", "wb") as pred_out:
     #     pickle.dump(train_data, arg_out)
     #     pickle.dump(dev_data, pred_out)
-
+    # import sys; sys.exit()
     train_in = open("train_stuff.pkl", "rb")
     dev_in = open("dev_stuff.pkl", "rb")
     train_data = pickle.load(train_in)
