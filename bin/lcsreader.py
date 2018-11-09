@@ -95,35 +95,36 @@ def eventivity(row):
         return 0
 
 
-path = "/Users/venkat/Downloads/LCS/verbs-English.lcs"
-lcs = LexicalConceptualStructureLexicon(path)
+if __name__ == "__main__":
+    path = "/Users/venkat/Downloads/LCS/verbs-English.lcs"
+    lcs = LexicalConceptualStructureLexicon(path)
 
-# Read annotations
-datafile = "../../../protocols/data/pred_long_data.tsv"
-response = ["Is.Particular", "Is.Hypothetical", "Is.Dynamic"]
-response_conf = ["Part.Confidence", "Hyp.Confidence", "Dyn.Confidence"]
-attributes = ["part", "hyp", "dyn"]
-attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
-attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
-         "hyp": "Hyp.Confidence"}
-token_col = "Pred.Root.Token"
+    # Read annotations
+    datafile = "../../../protocols/data/pred_long_data.tsv"
+    response = ["Is.Particular", "Is.Hypothetical", "Is.Dynamic"]
+    response_conf = ["Part.Confidence", "Hyp.Confidence", "Dyn.Confidence"]
+    attributes = ["part", "hyp", "dyn"]
+    attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
+    attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
+             "hyp": "Hyp.Confidence"}
+    token_col = "Pred.Root.Token"
 
-data = pd.read_csv(datafile, sep="\t")
+    data = pd.read_csv(datafile, sep="\t")
 
-data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data[token_col].map(lambda x: str(x))
+    data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data[token_col].map(lambda x: str(x))
 
-# Split the datasets into train, dev, test
-data_test = data[data['Split'] == 'test']
-data_dev = data[data['Split'] == 'dev']
-data = data[data['Split'] == 'train']
+    # Split the datasets into train, dev, test
+    data_test = data[data['Split'] == 'test']
+    data_dev = data[data['Split'] == 'dev']
+    data = data[data['Split'] == 'train']
 
-# Convert responses to 1s and 0s
-for resp in response:
-    data[resp] = data[resp].astype(int)
+    # Convert responses to 1s and 0s
+    for resp in response:
+        data[resp] = data[resp].astype(int)
 
-data['lcs_eventive'] = data['Predicate.Lemma'].map(lambda x: lcs.eventive(x) if x in lcs.verbs else -1)
+    data['lcs_eventive'] = data['Predicate.Lemma'].map(lambda x: lcs.eventive(x) if x in lcs.verbs else -1)
 
-dyn_check = data[data['lcs_eventive'] != -1]
-dyn_check['compare'] = dyn_check.apply(lambda row: eventivity(row), axis=1)
-print(len(dyn_check) / len(data))
-print("LCS", sum(dyn_check['compare']) / len(dyn_check))
+    dyn_check = data[data['lcs_eventive'] != -1]
+    dyn_check['compare'] = dyn_check.apply(lambda row: eventivity(row), axis=1)
+    print(len(dyn_check) / len(data))
+    print("LCS", sum(dyn_check['compare']) / len(dyn_check))

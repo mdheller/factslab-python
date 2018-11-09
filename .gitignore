@@ -7,3 +7,4 @@ dist/
 .ipynb_checkpoints/
 *.sbatch
 *.lcs
+*.pkl

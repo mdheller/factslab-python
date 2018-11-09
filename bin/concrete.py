@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
+import pickle
+from os.path import expanduser
 
 
 def ridit(x):
@@ -28,8 +30,9 @@ def ridit(x):
     return ridit_map[x_shift]
 
 
-if __name__ == "main"
-    datafile = "../../../protocols/data/noun_long_data.tsv"
+if __name__ == "__main__":
+    home = expanduser('~')
+    datafile = home + '/Desktop/protocols/data/arg_long_data.tsv'
     response = ["Is.Particular", "Is.Kind", "Is.Abstract"]
     response_conf = ["Part.Confidence", "Kind.Confidence", "Abs.Confidence"]
     attributes = ["part", "kind", "abs"]
@@ -54,12 +57,14 @@ if __name__ == "main"
         data['ridit_' + resp_conf] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
         data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else -1) * data['ridit_' + resp_conf]
 
-    path = "/Users/venkat/Downloads/Concreteness/concreteness.tsv"
+    path = "concreteness.tsv"
     concreteness = pd.read_csv(path, sep="\t")
     list_of_lemmas = concreteness['Word'].values.tolist()
 
-    abs_conc = data.groupby('Noun.Lemma')['Is.Abstract.norm'].median().to_frame().reset_index()
-    abs_conc['Concreteness'] = abs_conc['Noun.Lemma'].map(lambda x: concreteness[concreteness['Word'] == x.lower()]['Conc.M'].values[0] if x.lower() in list_of_lemmas else -1)
+    with open('concrete.pkl', 'wb') as f:
+        pickle.dump(concreteness, f)
+    abs_conc = data.groupby('Lemma')['Is.Abstract.norm'].median().to_frame().reset_index()
+    abs_conc['Concreteness'] = abs_conc['Lemma'].map(lambda x: concreteness[concreteness['Word'] == x.lower()]['Conc.M'].values[0] if x.lower() in list_of_lemmas else -1)
     ini = len(abs_conc)
     abs_conc = abs_conc[abs_conc['Concreteness'] != -1]
     print(len(abs_conc) / ini)
