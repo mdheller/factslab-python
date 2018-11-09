@@ -120,6 +120,17 @@ def ridit(x):
     return ridit_map[x_shift]
 
 
+def padding(l1):
+    '''
+        Adds <PAD> to end of list
+    '''
+    for minib in l1:
+        max_sent_length = max([len(sent) for sent in minib])
+        for sent in minib:
+            sent += ['<PAD>' for j in range(max_sent_length - len(sent))]
+    return l1
+
+
 def interleave_lists(l1, l2):
     '''
         Interleave two lists and append remaining elements of longer to end
@@ -156,7 +167,8 @@ def dev_mode_group(group, attributes, attr_map, attr_conf):
 def read_data(datafile, attributes, attr_map, attr_conf, regressiontype,
               structures, batch_size):
     '''
-        Reads datafiles, and does all the necessary shenanighans
+        Reads datafiles, and create minibatched(if desired) lists
+        of x, y, tokens, spans, context_roots, context_spans, loss_wts
     '''
     data = pd.read_csv(datafile, sep="\t")
     data = data.dropna()
@@ -195,27 +207,20 @@ def read_data(datafile, attributes, attr_map, attr_conf, regressiontype,
     data_test = shuffle(data_test).reset_index(drop=True)
 
     # Prepare all the inputs for the neural model
-    x = [data['Structure'].values.tolist()[i:i + batch_size] for i in range(0, len(data['Structure']), batch_size)]
-    x[-1] = x[-1] + x[-2][0:len(x[-2]) - len(x[-1])]
+    x = [[datum[:] for datum in data['Structure'].values.tolist()][i:i + batch_size] for i in range(0, len(data['Structure']), batch_size)]
 
     tokens = [data["Root.Token"].values.tolist()[i:i + batch_size] for i in range(0, len(data["Root.Token"]), batch_size)]
-    tokens[-1] = np.append(tokens[-1], tokens[-2][0:len(tokens[-2]) - len(tokens[-1])])
 
     context_roots = [data["Context.Root"].values.tolist()[i:i + batch_size] for i in range(0, len(data["Context.Root"]), batch_size)]
-    context_roots[-1] = np.append(context_roots[-1], context_roots[-2][0:len(context_roots[-2]) - len(context_roots[-1])])
 
-    context_spans = [data["Context.Span"].values.tolist()[i:i + batch_size] for i in range(0, len(data["Context.Span"]), batch_size)]
-    context_spans[-1] = np.append(context_spans[-1], context_spans[-2][0:len(context_spans[-2]) - len(context_spans[-1])])
+    context_spans = [[datum[:] for datum in data['Context.Span'].values.tolist()][i:i + batch_size] for i in range(0, len(data["Context.Span"]), batch_size)]
 
     # Form tuples from the contexts
-    spans = [data["Span"].values.tolist()[i:i + batch_size] for i in range(0, len(data["Span"]), batch_size)]
-    spans[-1] = np.append(spans[-1], spans[-2][0:len(spans[-2]) - len(spans[-1])])
+    spans = [[datum[:] for datum in data['Span'].values.tolist()][i:i + batch_size] for i in range(0, len(data["Span"]), batch_size)]
 
     y = [{attr: (data[attr_map[attr] + ".norm"].values[i:i + batch_size]) for attr in attributes} for i in range(0, len(data[attr_map[attr] + ".norm"].values), batch_size)]
-    y[-1] = {attr: np.append(y[-1][attr], y[-2][attr][0:len(y[-2][attr]) - len(y[-1][attr])]) for attr in attributes}
 
     loss_wts = [{attr: data[attr_conf[attr] + ".norm"].values[i:i + batch_size] for attr in attributes} for i in range(0, len(data[attr_conf[attr] + ".norm"].values), batch_size)]
-    loss_wts[-1] = {attr: np.append(loss_wts[-1][attr], loss_wts[-2][attr][0:len(loss_wts[-2][attr]) - len(loss_wts[-1][attr])]) for attr in attributes}
 
     # Create dev data
     if regressiontype == "linear":
@@ -225,32 +230,21 @@ def read_data(datafile, attributes, attr_map, attr_conf, regressiontype,
 
     data_dev_mean['Structure'] = data_dev_mean['Unique.ID'].map(lambda x: data_dev[data_dev['Unique.ID'] == x]['Structure'].iloc[0])
 
-    dev_x = [data_dev_mean['Structure'].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean['Structure']), batch_size)]
-    dev_x[-1] = dev_x[-1] + dev_x[-2][0:len(dev_x[-2]) - len(dev_x[-1])]
+    dev_x = [[datum[:] for datum in data_dev_mean['Structure'].values.tolist()][i:i + batch_size] for i in range(0, len(data_dev_mean['Structure']), batch_size)]
 
     dev_tokens = [data_dev_mean["Root.Token"].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean["Root.Token"]), batch_size)]
-    dev_tokens[-1] = np.append(dev_tokens[-1], dev_tokens[-2][0:len(dev_tokens[-2]) - len(dev_tokens[-1])])
 
     dev_context_roots = [data_dev_mean["Context.Root"].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean["Context.Root"]), batch_size)]
-    dev_context_roots[-1] = np.append(dev_context_roots[-1], dev_context_roots[-2][0:len(dev_context_roots[-2]) - len(dev_context_roots[-1])])
 
-    dev_context_spans = [data_dev_mean["Context.Span"].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean["Context.Span"]), batch_size)]
-    dev_context_spans[-1] = np.append(dev_context_spans[-1], dev_context_spans[-2][0:len(dev_context_spans[-2]) - len(dev_context_spans[-1])])
+    dev_context_spans = [[datum[:] for datum in data_dev_mean['Context.Span'].values.tolist()][i:i + batch_size] for i in range(0, len(data_dev_mean["Context.Span"]), batch_size)]
 
-    dev_spans = [data_dev_mean["Span"].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean["Span"]), batch_size)]
-    dev_spans[-1] = np.append(dev_spans[-1], dev_spans[-2][0:len(dev_spans[-2]) - len(dev_spans[-1])])
+    dev_spans = [[datum[:] for datum in data_dev_mean['Span'].values.tolist()][i:i + batch_size] for i in range(0, len(data_dev_mean["Span"]), batch_size)]
 
     dev_y = {}
     dev_wts = {}
     for attr in attributes:
-        dev_y[attr] = [data_dev_mean[attr_map[attr] + ".norm"].values[i:i + batch_size] for i in range(0, len(data_dev_mean[attr_map[attr] + ".norm"].values), batch_size)]
-        dev_y[attr][-1] = np.append(dev_y[attr][-1], dev_y[attr][-2][0:len(dev_y[attr][-2]) - len(dev_y[attr][-1])])
-        dev_wts[attr] = [data_dev_mean[attr_conf[attr] + ".norm"].values[i:i + batch_size] for i in range(0, len(data_dev_mean[attr_conf[attr] + ".norm"].values), batch_size)]
-        dev_wts[attr][-1] = np.append(dev_wts[attr][-1], dev_wts[attr][-2][0:len(dev_wts[attr][-2]) - len(dev_wts[attr][-1])])
-
-    for attr in attributes:
-        dev_y[attr] = np.concatenate(dev_y[attr], axis=None)
-        dev_wts[attr] = np.concatenate(dev_wts[attr], axis=None)
+        dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
+        dev_wts[attr] = data_dev_mean[attr_conf[attr] + ".norm"].values
 
     dev = [dev_x, dev_y, dev_tokens, dev_spans, dev_context_roots, dev_context_spans, dev_wts]
     train = [x, y, tokens, spans, context_roots, context_spans, loss_wts]

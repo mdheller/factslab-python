@@ -1,5 +1,5 @@
 import argparse
-from factslab.utility import read_data, interleave_lists
+from factslab.utility import read_data, interleave_lists, load_glove_embedding, padding
 from factslab.pytorch.mlpregression import MLPTrainer
 from torch.cuda import is_available
 from torch import device
@@ -33,7 +33,7 @@ if __name__ == "__main__":
                         default=0)
     parser.add_argument('--batchsize',
                         type=int,
-                        default=128)
+                        default=64)
     parser.add_argument('--argrep',
                         type=str,
                         default="root",
@@ -86,7 +86,8 @@ if __name__ == "__main__":
     #                       regressiontype=args.regressiontype,
     #                       structures=structures, batch_size=args.batchsize)
     # pred_stuff = read_data(datafile=pred_datafile,
-    #                        attributes=pred_attributes, attr_map=pred_attr_map,
+    #                        attributes=pred_attributes,
+    #                        attr_map=pred_attr_map,
     #                        attr_conf=pred_attr_conf,
     #                        regressiontype=args.regressiontype,
     #                        structures=structures, batch_size=args.batchsize)
@@ -108,25 +109,34 @@ if __name__ == "__main__":
     train_in.close()
     dev_in.close()
 
+    x, y, tokens, spans, context_roots, context_spans, loss_wts = train_data
+
     # ELMO parameters
-    options_file = args.embeddings + "options/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
-    weight_file = args.embeddings + "weights/elmo_2x4096_512_2048cnn_2xhighway_5.5B_weights.hdf5"
-    elmo_params = (options_file, weight_file)
+    if 'elmo' in args.embeddings:
+        options_file = args.embeddings + "options/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
+        weight_file = args.embeddings + "weights/elmo_2x4096_512_2048cnn_2xhighway_5.5B_weights.hdf5"
+        embed_params = (options_file, weight_file)
+        embed_dim = 1024
+    elif 'glove' in args.embeddings:
+        dev_x_arg = dev_data['arg'][0]
+        dev_x_pred = dev_data['pred'][0]
+        vocab = list(set([word for minib in (x + dev_x_arg + dev_x_pred) for sent in minib for word in sent]))
+        x = padding(x)
+        dev_data['arg'][0] = padding(dev_data['arg'][0])
+        dev_data['pred'][0] = padding(dev_data['pred'][0])
+
+        embed_params = (load_glove_embedding(args.embeddings, vocab), vocab + ["<PAD>"])
+        embed_dim = 300
 
     # pyTorch figures out device to do computation on
     device_to_use = device("cuda:0" if is_available() else "cpu")
 
     # Initialise the model
-    trainer = MLPTrainer(embed_params=elmo_params, all_attrs=attributes,
+    trainer = MLPTrainer(embed_params=embed_params, all_attrs=attributes,
                          device=device_to_use, attention_type=model_type,
-                         lr=args.lr, weight_decay=args.wd)
+                         lr=args.lr, weight_decay=args.wd, embedding_dim=embed_dim)
 
-    # Now to prepare all the damn inputs
-
-    x, y, tokens, spans, context_roots, context_spans, loss_wts = train_data
     # Training phase
     trainer.fit(X=x, Y=y, loss_wts=loss_wts, tokens=tokens, spans=spans,
                 context_roots=context_roots, context_spans=context_spans,
                 dev=dev_data, epochs=args.epochs)
-
-    # Save the model
