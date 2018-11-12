@@ -209,7 +209,7 @@ def read_data(datafile, attributes, attr_map, attr_conf, regressiontype,
     # Prepare all the inputs for the neural model
     x = [[datum[:] for datum in data['Structure'].values.tolist()][i:i + batch_size] for i in range(0, len(data['Structure']), batch_size)]
 
-    tokens = [data["Root.Token"].values.tolist()[i:i + batch_size] for i in range(0, len(data["Root.Token"]), batch_size)]
+    roots = [data["Root.Token"].values.tolist()[i:i + batch_size] for i in range(0, len(data["Root.Token"]), batch_size)]
 
     context_roots = [data["Context.Root"].values.tolist()[i:i + batch_size] for i in range(0, len(data["Context.Root"]), batch_size)]
 
@@ -232,7 +232,7 @@ def read_data(datafile, attributes, attr_map, attr_conf, regressiontype,
 
     dev_x = [[datum[:] for datum in data_dev_mean['Structure'].values.tolist()][i:i + batch_size] for i in range(0, len(data_dev_mean['Structure']), batch_size)]
 
-    dev_tokens = [data_dev_mean["Root.Token"].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean["Root.Token"]), batch_size)]
+    dev_roots = [data_dev_mean["Root.Token"].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean["Root.Token"]), batch_size)]
 
     dev_context_roots = [data_dev_mean["Context.Root"].values.tolist()[i:i + batch_size] for i in range(0, len(data_dev_mean["Context.Root"]), batch_size)]
 
@@ -246,7 +246,7 @@ def read_data(datafile, attributes, attr_map, attr_conf, regressiontype,
         dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
         dev_wts[attr] = data_dev_mean[attr_conf[attr] + ".norm"].values
 
-    dev = [dev_x, dev_y, dev_tokens, dev_spans, dev_context_roots, dev_context_spans, dev_wts]
-    train = [x, y, tokens, spans, context_roots, context_spans, loss_wts]
+    dev = [dev_x, dev_y, dev_roots, dev_spans, dev_context_roots, dev_context_spans, dev_wts]
+    train = [x, y, roots, spans, context_roots, context_spans, loss_wts]
 
     return (train, dev)

@@ -109,12 +109,12 @@ if __name__ == "__main__":
     train_in.close()
     dev_in.close()
 
-    x, y, tokens, spans, context_roots, context_spans, loss_wts = train_data
+    x, y, roots, spans, context_roots, context_spans, loss_wts = train_data
 
     # ELMO parameters
     if 'elmo' in args.embeddings:
-        options_file = args.embeddings + "options/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
-        weight_file = args.embeddings + "weights/elmo_2x4096_512_2048cnn_2xhighway_5.5B_weights.hdf5"
+        options_file = args.embeddings + "options/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+        weight_file = args.embeddings + "weights/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
         embed_params = (options_file, weight_file)
         embed_dim = 1024
     elif 'glove' in args.embeddings:
@@ -137,6 +137,6 @@ if __name__ == "__main__":
                          lr=args.lr, weight_decay=args.wd, embedding_dim=embed_dim)
 
     # Training phase
-    trainer.fit(X=x, Y=y, loss_wts=loss_wts, tokens=tokens, spans=spans,
+    trainer.fit(X=x, Y=y, loss_wts=loss_wts, roots=roots, spans=spans,
                 context_roots=context_roots, context_spans=context_spans,
                 dev=dev_data, epochs=args.epochs)
