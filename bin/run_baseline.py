@@ -2,23 +2,20 @@ import argparse
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LogisticRegression as LR
-from sklearn.svm import SVC, LinearSVC
+from sklearn.svm import LinearSVC
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1
 from sklearn.utils import shuffle
-from predpatt import load_conllu
-from predpatt import PredPatt
-from predpatt import PredPattOpts
+from predpatt import load_conllu, PredPatt, PredPattOpts
 from os.path import expanduser
 from sklearn.model_selection import GridSearchCV, PredefinedSplit
 from collections import Counter
 from factslab.utility import ridit, dev_mode_group
-from nltk.corpus import verbnet
 from scipy.stats import mode
 import warnings
 import pickle
 from nltk.stem import WordNetLemmatizer
-from nltk.corpus import wordnet
+from nltk.corpus import wordnet, framenet, verbnet
 import sys
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -76,12 +73,16 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
     for synset in wordnet.synsets(lemma):
         dict_feats[synset.lexname()] = 1
 
+    # # framenet name
+    # for f_name in [x.name for x in framenet.frames_by_lemma(lemma)]:
+    #     dict_feats[f_name] = 1
+
     # Predicate features
     if prot == "pred":
         # verbnet class
         f_lemma = verbnet.classids(lemma=lemma)
         for f in f_lemma:
-            dict_feats[f] += 1
+            dict_feats[f] = 1
 
         # lcs eventiveness
         dict_feats['lcs'] = lcs_score(lcs, lemma)
@@ -90,7 +91,10 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
         dict_feats['concreteness'] = 0
         for g_lemma in [lmt.lemmatize(x[2].text) for x in sent.tokens[token].dependents]:
             dict_feats['concreteness'] += concreteness_score(concreteness, g_lemma)
-
+        if len(sent.tokens[token].dependents):
+            dict_feats['concreteness'] /= len(sent.tokens[token].dependents)
+        else:
+            dict_feats['concreteness'] = 2.5
     # Argument features
     else:
         dict_feats['concreteness'] = concreteness_score(concreteness, lemma)
@@ -220,6 +224,9 @@ if __name__ == "__main__":
 
         # Wordnet supersenses(lexicographer names)
         supersenses = list(set([x.lexname() for x in wordnet.all_synsets()]))
+
+        # # Framenet
+        # frame_names = [x.name for x in framenet.frames()]
 
         lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
 
