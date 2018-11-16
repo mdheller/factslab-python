@@ -3,55 +3,107 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LogisticRegression as LR
 from sklearn.svm import SVC, LinearSVC
+from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1
 from sklearn.utils import shuffle
 from predpatt import load_conllu
 from predpatt import PredPatt
 from predpatt import PredPattOpts
 from os.path import expanduser
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, PredefinedSplit
 from collections import Counter
 from factslab.utility import ridit, dev_mode_group
 from nltk.corpus import verbnet
 from scipy.stats import mode
 import warnings
 import pickle
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import wordnet
+import sys
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
-def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness=None, lcs=None):
+def concreteness_score(concreteness, lemma):
+    '''
+        Returns concreteness score(float) for lemma
+    '''
+    if lemma in concreteness['Word'].values.tolist():
+        score = concreteness[concreteness['Word'] == lemma]['Conc.M'].values[0]
+    elif lemma.lower() in concreteness['Word'].values.tolist():
+        score = concreteness[concreteness['Word'] == lemma.lower()]['Conc.M'].values[0]
+    else:
+        score = 2.5
+
+    return score
+
+
+def lcs_score(lcs, lemma):
+    '''
+        Returns eventiveness score(0 or 1)
+    '''
+    if lemma in lcs.verbs:
+        if True in lcs.eventive(lemma):
+            score = 1
+        else:
+            score = 0
+    else:
+        score = -1
+
+    return score
+
+
+def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
+    lmt = WordNetLemmatizer()
     '''Extract features from a word'''
     sent = sent_feat[0]
     feats = sent_feat[1]
     deps = [x[2] for x in sent.tokens[token].dependents]
     deps_text = [x[2].text for x in sent.tokens[token].dependents]
     deps_feats = '|'.join([(a + "_dep") for x in deps for a in feats[x.position].split('|')])
-    # Not creating separate features for PronType=Art and Poss=yes, using existing columns because its rare that they'll be in the token itself
+
     all_feats = (feats[token] + '|' + deps_feats).split('|')
     all_feats = list(filter(None, all_feats))
+    # UD Lexical features
     for f in all_feats:
         dict_feats[f] += 1
-    # now do lexical features
+
+    # Lexical item features
     for f in deps_text:
         if f in dict_feats.keys():
             dict_feats[f] += 1
 
+    # wordnet supersense of lemma
+    for synset in wordnet.synsets(lemma):
+        dict_feats[synset.lexname()] = 1
+
+    # Predicate features
     if prot == "pred":
+        # verbnet class
         f_lemma = verbnet.classids(lemma=lemma)
         for f in f_lemma:
-            dict_feats[f] = 1
-        if lemma in lcs.verbs:
-            if True in lcs.eventive(lemma):
-                dict_feats['lcs'] = 1
-            else:
-                dict_feats['lcs'] = 0
-        else:
-            dict_feats['lcs'] = -1
+            dict_feats[f] += 1
+
+        # lcs eventiveness
+        dict_feats['lcs'] = lcs_score(lcs, lemma)
+
+        # sum of concreteness score of dependents
+        dict_feats['concreteness'] = 0
+        for g_lemma in [lmt.lemmatize(x[2].text) for x in sent.tokens[token].dependents]:
+            dict_feats['concreteness'] += concreteness_score(concreteness, g_lemma)
+
+    # Argument features
     else:
-        if lemma in concreteness['Word'].values.tolist():
-            dict_feats['concreteness'] = concreteness[concreteness['Word'] == lemma.lower()]['Conc.M'].values[0]
+        dict_feats['concreteness'] = concreteness_score(concreteness, lemma)
+
+        # lcs eventiveness score and verbnet class of argument head
+        if not sent.tokens[token].gov:
+            dict_feats['lcs'] = -1
         else:
-            dict_feats['concreteness'] = 2.5
+            gov_lemma = lmt.lemmatize(sent.tokens[token].gov.text, 'v')
+            dict_feats['lcs'] = lcs_score(lcs, gov_lemma)
+
+            for f_lemma in verbnet.classids(lemma=gov_lemma):
+                dict_feats[f_lemma] += 1
 
     return dict_feats
 
@@ -66,18 +118,15 @@ if __name__ == "__main__":
                         default='noun')
     parser.add_argument('--model',
                         type=str,
-                        default='lr')
-    parser.add_argument('--create',
+                        default='mlp')
+    parser.add_argument('--load_data',
                         action='store_true')
 
     sigdig = 3
     # parse arguments
     args = parser.parse_args()
     home = expanduser('~')
-    if args.model == "lr":
-        classifier = LR()
-    else:
-        classifier = LinearSVC()
+
     if args.prot == "noun":
         datafile = home + '/Desktop/protocols/data/arg_long_data.tsv'
         attributes = ["part", "kind", "abs"]
@@ -90,23 +139,29 @@ if __name__ == "__main__":
         attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
         attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
                  "hyp": "Hyp.Confidence"}
-    if args.create:
+
+    if args.load_data:
         data = pd.read_csv(datafile, sep="\t")
         data = data.dropna()
         data['Unique.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x["Span"]), axis=1)
         data['Split.Sentence.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']), axis=1)
 
+        # Load the sentences
+        sentences = {}
+        with open(home + '/Desktop/protocols/data/sentences.tsv', 'r') as f:
+            for line in f.readlines():
+                structs = line.split('\t')
+                sentences[structs[0]] = structs[1].split()
+        data['Sentence'] = data['Split.Sentence.ID'].map(lambda x: sentences[x])
+
         # Load the features
         features = {}
-
-        # Don't read_csv the features file. read_csv can't handle quotes
         with open("features.tsv", 'r') as f:
             for line in f.readlines():
                 feats = line.split('\t')
                 features[feats[0]] = feats[1].split()
 
         # Load the predpatt objects for creating features
-
         files = ['/UD_English-r1.2/en-ud-train.conllu',
                  '/UD_English-r1.2/en-ud-dev.conllu',
                  '/UD_English-r1.2/en-ud-test.conllu']
@@ -136,7 +191,7 @@ if __name__ == "__main__":
             data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
             data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
 
-         # Shuffle the data
+        # Shuffle the data
         data = shuffle(data).reset_index(drop=True)
         data_dev = shuffle(data_dev).reset_index(drop=True)
         data_test = shuffle(data_test).reset_index(drop=True)
@@ -152,41 +207,43 @@ if __name__ == "__main__":
         dev_lemmas = data_dev_mean['Lemma'].tolist()
 
         all_x = raw_x + raw_dev_x
-        # Now figure out the features here before calculating them
         all_feats = '|'.join(['|'.join(all_x[i][1]) for i in range(len(all_x))])
         feature_cols = Counter(all_feats.split('|'))
         dict_feats = {}
-        # Create dictionary of features for root and dependents
+
+        f = open('concrete.pkl', 'rb')
+        concreteness = pickle.load(f)
+        f.close()
+
+        from lcsreader import LexicalConceptualStructureLexicon
+        lcs = LexicalConceptualStructureLexicon('verbs-English.lcs')
+
+        # Wordnet supersenses(lexicographer names)
+        supersenses = list(set([x.lexname() for x in wordnet.all_synsets()]))
+
+        lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
+
+        for f in verbnet.classids() + lexical_feats + supersenses:
+            dict_feats[f] = 0
         for a in feature_cols.keys():
             dict_feats[a] = 0
             dict_feats[a + "_dep"] = 0
-        if args.prot == "noun":
-            lexical_feats = ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
-            lcs = None
-            # concreteness ratings
-            f = open('concrete.pkl', 'rb')
-            concreteness = pickle.load(f)
-            f.close()
-        else:
-            lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need']
-            concreteness = None
-            # Verbnet classes
-            for f in verbnet.classids():
-                dict_feats[f] = 0
-            # LCS eventiveness
-            from lcsreader import LexicalConceptualStructureLexicon
-            lcs = LexicalConceptualStructureLexicon('verbs-English.lcs')
-        for new_key in lexical_feats:
-            dict_feats[new_key] = 0
 
-        x = []
         x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs) for sent, token, lemma in zip(raw_x, tokens, lemmas)])
-        x = x_pd.values
         y = {}
         for attr in attributes:
             y[attr] = data[attr_map[attr] + ".norm"].values
 
-        dev_x = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs) for sent, token, lemma in zip(raw_dev_x, dev_tokens, dev_lemmas)]).values
+        dev_x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs) for sent, token, lemma in zip(raw_dev_x, dev_tokens, dev_lemmas)])
+
+        # Figure out which columns to drop(they're always zero)
+        todrop1 = dev_x_pd.columns[(dev_x_pd == 0).all()].values.tolist()
+        todrop = x_pd.columns[(x_pd == 0).all()].values.tolist()
+        intdrop = [a for a in todrop if a not in todrop1]
+        cols_to_drop = cols_to_drop = list(set(todrop) - set(intdrop))
+
+        x = x_pd.drop(cols_to_drop, axis=1).values
+        dev_x = dev_x_pd.drop(cols_to_drop, axis=1).values
         dev_y = {}
         for attr in attributes:
             dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
@@ -194,32 +251,63 @@ if __name__ == "__main__":
         fout = open(args.prot + 'baseline.pkl', 'wb')
         pickle.dump([x, y, dev_x, dev_y, data, data_dev_mean], fout)
         fout.close()
-        import sys; sys.exit(0)
+        sys.exit(0)
+
+    fin = open(args.prot + 'baseline.pkl', 'rb')
+    x, y, dev_x, dev_y, data, data_dev_mean = pickle.load(fin)
+
+    if args.model == "mlp":
+        classifier = MLPClassifier()
+
+        parameters = {'hidden_layer_sizes': [(256, 32), (512, 64), (512, 32)], 'alpha': [0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'activation': ['tanh', 'relu']}
+
+        y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
+        dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
+
+        all_x = np.concatenate((x, dev_x), axis=0)
+        all_y = np.concatenate((y, dev_y), axis=0)
+        test_fold = [-1 for i in range(len(x))] + [0 for j in range(len(dev_x))]
+        ps = PredefinedSplit(test_fold=test_fold)
+        clf = GridSearchCV(classifier, parameters, n_jobs=-1, verbose=1, cv=ps)
+        clf.fit(all_x, all_y)
+        print(clf.best_params_)
+        # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
+        #         print(p, np.round(tr, sigdig))
+
+        y_pred_dev = clf.predict(dev_x)
+        for ind, attr in enumerate(attributes):
+            print(attr_map[attr])
+            mode_ = mode(dev_y[:, ind])[0][0]
+            print("Accuracy mode =", mode_, ":", np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))]), sigdig))
+            print("Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), "\n",
+                  "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), "\n",
+                  "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), "\n",
+                  "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), "\n")
     else:
-        fin = open(args.prot + 'baseline.pkl', 'rb')
-        x, y, dev_x, dev_y, data, data_dev_mean = pickle.load(fin)
-        parameters = {}
-        for attr in attributes:
-            if args.model == "lr":
-                parameters[attr] = {'C': [0.1, 0.5, 1, 2, 5, 10, 100], 'penalty': ['l1', 'l2']}
-            else:
-                parameters[attr] = {'C': [0.01, 0.1, 0.5, 1, 10, 100]}
+        if args.model == "lr":
+            classifier = LR()
+            parameters = {'C': [0.01, 0.1, 0.5, 1, 10, 100], 'penalty': ['l1', 'l2']}
+        elif args.model == "svm":
+            classifier = LinearSVC()
+            parameters = {'C': [0.01, 0.1, 0.5, 1, 10, 100]}
+
+        all_x = np.concatenate((x, dev_x), axis=0)
+        test_fold = [-1 for i in range(len(x))] + [0 for j in range(len(dev_x))]
+        ps = PredefinedSplit(test_fold=test_fold)
 
         for attr in attributes:
-            print(attr_map[attr])
-            mode_ = mode(dev_y[attr])[0][0]
-            # Grid search
             loss_wts = data[attr_conf[attr] + ".norm"].values
             dev_loss_wts = data_dev_mean[attr_conf[attr] + ".norm"].values
 
-            print("Accuracy with mode =", mode_, ":", np.round(accuracy(dev_y[attr], [mode_ for a in range(len(dev_y[attr]))]), sigdig))
-            clf = GridSearchCV(classifier, parameters[attr], n_jobs=-1, verbose=0, fit_params={'sample_weight': loss_wts})
-            clf.fit(x, y[attr])
-
-            # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
-            #     print(p, np.round(tr, sigdig))
+            all_y = np.concatenate((y[attr], dev_y[attr]))
+            all_loss_wts = np.concatenate((loss_wts, dev_loss_wts))
+            clf = GridSearchCV(classifier, parameters, n_jobs=-1, verbose=1, cv=ps, fit_params={'sample_weight': all_loss_wts})
+            clf.fit(all_x, all_y)
 
             y_pred_dev = clf.predict(dev_x)
+            print(attr_map[attr])
+            mode_ = mode(dev_y[attr])[0][0]
+            print("Accuracy mode =", mode_, ":", np.round(accuracy(dev_y[attr], [mode_ for a in range(len(dev_y[attr]))]), sigdig))
             print("Accuracy :\t", np.round(accuracy(dev_y[attr], y_pred_dev), sigdig), "\n",
                   "Precision :\t", np.round(precision(dev_y[attr], y_pred_dev, pos_label=mode_), sigdig), "\n",
                   "Recall :\t", np.round(recall(dev_y[attr], y_pred_dev, pos_label=mode_), sigdig), "\n",
