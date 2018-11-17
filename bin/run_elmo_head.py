@@ -4,6 +4,7 @@ from factslab.pytorch.mlpregression import MLPTrainer
 from torch.cuda import is_available
 from torch import device
 from os.path import expanduser
+import sys
 import pickle
 
 
@@ -13,6 +14,11 @@ if __name__ == "__main__":
     description = 'Run a simple MLP with(out) attention of varying types on ELMO.'
     parser = argparse.ArgumentParser(description=description)
 
+    parser.add_argument('--load_data',
+                        action='store_true')
+    parser.add_argument('--protocol',
+                        type=str,
+                        default='arg')
     parser.add_argument('--datapath',
                         type=str,
                         default=home + '/Desktop/protocols/data/')
@@ -34,6 +40,9 @@ if __name__ == "__main__":
     parser.add_argument('--batchsize',
                         type=int,
                         default=64)
+    parser.add_argument('--layers',
+                        type=str,
+                        default='512,64')
     parser.add_argument('--argrep',
                         type=str,
                         default="root",
@@ -53,63 +62,62 @@ if __name__ == "__main__":
 
     # parse arguments
     args = parser.parse_args()
-
+    args.layers = [int(a) for a in args.layers.split(',')]
     # Dictionary storing the configuration of the model
     model_type = {'arg': {'repr': args.argrep, 'context': args.argcontext},
                   'pred': {'repr': args.predrep, 'context': args.predcontext}}
 
     arg_datafile = args.datapath + "arg_long_data.tsv"
-    arg_attributes = ["part", "kind", "abs"]
     arg_attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
     arg_attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
                      "abs": "Abs.Confidence"}
 
     pred_datafile = args.datapath + "pred_long_data.tsv"
-    pred_attributes = ["part", "hyp", "dyn"]
     pred_attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
     pred_attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
                       "hyp": "Hyp.Confidence"}
 
-    attributes = {'arg': ['part', 'kind', 'abs'], 'pred': ['part', 'dyn', 'hyp']}
+    all_attributes = {'arg': ['part', 'kind', 'abs'],
+                      'pred': ['part', 'dyn', 'hyp']}
 
-    # Load the structures/sentences
+    if args.load_data:
+        # Load the sentences
+        sentences = {}
+        with open(home + '/Desktop/protocols/data/sentences.tsv', 'r') as f:
+            for line in f.readlines():
+                id_sent = line.split('\t')
+                sentences[id_sent[0]] = id_sent[1].split()
 
-    # structures = {}
-    # with open(home + '/Desktop/protocols/data/structures.tsv', 'r') as f:
-    #     for line in f.readlines():
-    #         structs = line.split('\t')
-    #         structures[structs[0]] = structs[1].split()
+        arg_stuff = read_data(prot='arg',
+                              datafile=arg_datafile,
+                              attributes=all_attributes['arg'],
+                              attr_map=arg_attr_map,
+                              attr_conf=arg_attr_conf,
+                              regressiontype=args.regressiontype,
+                              sentences=sentences, batch_size=args.batchsize)
+        pred_stuff = read_data(prot='pred',
+                               datafile=pred_datafile,
+                               attributes=all_attributes['pred'],
+                               attr_map=pred_attr_map,
+                               attr_conf=pred_attr_conf,
+                               regressiontype=args.regressiontype,
+                               sentences=sentences, batch_size=args.batchsize)
 
-    # arg_stuff = read_data(datafile=arg_datafile,
-    #                       attributes=arg_attributes,
-    #                       attr_map=arg_attr_map, attr_conf=arg_attr_conf,
-    #                       regressiontype=args.regressiontype,
-    #                       structures=structures, batch_size=args.batchsize)
-    # pred_stuff = read_data(datafile=pred_datafile,
-    #                        attributes=pred_attributes,
-    #                        attr_map=pred_attr_map,
-    #                        attr_conf=pred_attr_conf,
-    #                        regressiontype=args.regressiontype,
-    #                        structures=structures, batch_size=args.batchsize)
+        with open("arg_train_data.pkl", "wb") as train_arg_f, open("arg_dev_data.pkl", "wb") as dev_arg_f, open("pred_train_data.pkl", "wb") as train_pred_f, open("pred_dev_data.pkl", "wb") as dev_pred_f:
+            pickle.dump(arg_stuff[0], train_arg_f)
+            pickle.dump(arg_stuff[1], dev_arg_f)
+            pickle.dump(pred_stuff[0], train_pred_f)
+            pickle.dump(pred_stuff[1], dev_pred_f)
+        sys.exit(0)
 
-    # train_data = []
-    # dev_data = {'arg': None, 'pred': None}
-    # dev_data['arg'] = arg_stuff[1]
-    # dev_data['pred'] = pred_stuff[1]
-    # for ij in range(len(arg_stuff[0])):
-    #     train_data.append(interleave_lists(arg_stuff[0][ij], pred_stuff[0][ij]))
-    # with open("train_stuff.pkl", "wb") as arg_out, open("dev_stuff.pkl", "wb") as pred_out:
-    #     pickle.dump(train_data, arg_out)
-    #     pickle.dump(dev_data, pred_out)
-    # import sys; sys.exit()
-    train_in = open("train_stuff.pkl", "rb")
-    dev_in = open("dev_stuff.pkl", "rb")
+    train_in = open(args.protocol + "_train_data.pkl", "rb")
+    dev_in = open(args.protocol + "_dev_data.pkl", "rb")
     train_data = pickle.load(train_in)
     dev_data = pickle.load(dev_in)
     train_in.close()
     dev_in.close()
 
-    x, y, roots, spans, context_roots, context_spans, loss_wts = train_data
+    x, y, roots, spans, context_roots, context_spans, loss_wts, hand_feats = train_data
 
     # ELMO parameters
     if 'elmo' in args.embeddings:
@@ -132,11 +140,13 @@ if __name__ == "__main__":
     device_to_use = device("cuda:0" if is_available() else "cpu")
 
     # Initialise the model
-    trainer = MLPTrainer(embed_params=embed_params, all_attrs=attributes,
+    trainer = MLPTrainer(embed_params=embed_params,
+                         all_attributes=all_attributes, layers=args.layers,
                          device=device_to_use, attention_type=model_type,
                          lr=args.lr, weight_decay=args.wd, embedding_dim=embed_dim)
 
     # Training phase
     trainer.fit(X=x, Y=y, loss_wts=loss_wts, roots=roots, spans=spans,
                 context_roots=context_roots, context_spans=context_spans,
-                dev=dev_data, epochs=args.epochs)
+                hand_feats=hand_feats, dev=dev_data, epochs=args.epochs,
+                prot=args.protocol)
