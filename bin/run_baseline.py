@@ -10,7 +10,7 @@ from predpatt import load_conllu, PredPatt, PredPattOpts
 from os.path import expanduser
 from sklearn.model_selection import GridSearchCV, PredefinedSplit
 from collections import Counter
-from factslab.utility import ridit, dev_mode_group
+from factslab.utility import ridit, dev_mode_group, get_elmo
 from scipy.stats import mode
 import warnings
 import pickle
@@ -49,7 +49,7 @@ def lcs_score(lcs, lemma):
     return score
 
 
-def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
+def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, l2f):
     lmt = WordNetLemmatizer()
     '''Extract features from a word'''
     sent = sent_feat[0]
@@ -71,18 +71,17 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
 
     # wordnet supersense of lemma
     for synset in wordnet.synsets(lemma):
-        dict_feats[synset.lexname()] = 1
+        dict_feats['supersense=' + synset.lexname()] = 1
 
-    # # framenet name
-    # for f_name in [x.name for x in framenet.frames_by_lemma(lemma)]:
-    #     dict_feats[f_name] = 1
+    # framenet name
+
 
     # Predicate features
     if prot == "pred":
         # verbnet class
         f_lemma = verbnet.classids(lemma=lemma)
         for f in f_lemma:
-            dict_feats[f] = 1
+            dict_feats['classid=' + f] = 1
 
         # lcs eventiveness
         dict_feats['lcs'] = lcs_score(lcs, lemma)
@@ -107,7 +106,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
             dict_feats['lcs'] = lcs_score(lcs, gov_lemma)
 
             for f_lemma in verbnet.classids(lemma=gov_lemma):
-                dict_feats[f_lemma] += 1
+                dict_feats['classid=' + f_lemma] += 1
 
     return dict_feats
 
@@ -119,19 +118,28 @@ if __name__ == "__main__":
 
     parser.add_argument('--prot',
                         type=str,
-                        default='noun')
+                        default='arg')
+    parser.add_argument('--batch_size',
+                        type=int,
+                        default=128)
     parser.add_argument('--model',
                         type=str,
                         default='mlp')
     parser.add_argument('--load_data',
                         action='store_true')
+    parser.add_argument('--hand',
+                        action='store_true',
+                        help='Turn on hand engineering feats')
+    parser.add_argument('--embed',
+                        action='store_true',
+                        help='Turn on elmo/glove embeddings')
 
     sigdig = 3
     # parse arguments
     args = parser.parse_args()
     home = expanduser('~')
 
-    if args.prot == "noun":
+    if args.prot == "arg":
         datafile = home + '/Desktop/protocols/data/arg_long_data.tsv'
         attributes = ["part", "kind", "abs"]
         attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
@@ -156,20 +164,20 @@ if __name__ == "__main__":
             for line in f.readlines():
                 structs = line.split('\t')
                 sentences[structs[0]] = structs[1].split()
-        data['Sentence'] = data['Split.Sentence.ID'].map(lambda x: sentences[x])
+        data['Sentences'] = data['Split.Sentence.ID'].map(lambda x: sentences[x])
 
         # Load the features
         features = {}
-        with open("features.tsv", 'r') as f:
+        with open(home + '/Desktop/protocols/data/features.tsv', 'r') as f:
             for line in f.readlines():
                 feats = line.split('\t')
                 features[feats[0]] = feats[1].split()
 
         # Load the predpatt objects for creating features
-        files = ['/UD_English-r1.2/en-ud-train.conllu',
-                 '/UD_English-r1.2/en-ud-dev.conllu',
-                 '/UD_English-r1.2/en-ud-test.conllu']
-        home = expanduser("~/Downloads/")
+        files = ['/Downloads/UD_English-r1.2/en-ud-train.conllu',
+                 '/Downloads/UD_English-r1.2/en-ud-dev.conllu',
+                 '/Downloads/UD_English-r1.2/en-ud-test.conllu']
+
         options = PredPattOpts(resolve_relcl=True, borrow_arg_for_relcl=True, resolve_conj=False, cut=True)  # Resolve relative clause
         patt = {}
 
@@ -177,7 +185,7 @@ if __name__ == "__main__":
             path = home + file
             with open(path, 'r') as infile:
                 for sent_id, ud_parse in load_conllu(infile.read()):
-                    patt[file[23:][:-7] + " " + sent_id] = PredPatt(ud_parse, opts=options)
+                    patt[file[33:][:-7] + " " + sent_id] = PredPatt(ud_parse, opts=options)
 
         data['Structure'] = data['Split.Sentence.ID'].map(lambda x: (patt[x], features[x]))
 
@@ -203,45 +211,55 @@ if __name__ == "__main__":
         raw_x = data['Structure'].tolist()
         tokens = data['Root.Token'].tolist()
         lemmas = data['Lemma'].tolist()
+        sentences = data['Sentences'].tolist()
 
         data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf)).reset_index(drop=True)
 
         raw_dev_x = data_dev_mean['Structure'].tolist()
         dev_tokens = data_dev_mean['Root.Token'].tolist()
         dev_lemmas = data_dev_mean['Lemma'].tolist()
+        dev_sentences = data_dev_mean['Sentences'].tolist()
 
         all_x = raw_x + raw_dev_x
         all_feats = '|'.join(['|'.join(all_x[i][1]) for i in range(len(all_x))])
         feature_cols = Counter(all_feats.split('|'))
         dict_feats = {}
 
-        f = open('concrete.pkl', 'rb')
+        f = open(home + '/Desktop/protocols/data/concrete.pkl', 'rb')
         concreteness = pickle.load(f)
         f.close()
 
         from lcsreader import LexicalConceptualStructureLexicon
-        lcs = LexicalConceptualStructureLexicon('verbs-English.lcs')
+        lcs = LexicalConceptualStructureLexicon(home + '/Desktop/protocols/data/verbs-English.lcs')
 
         # Wordnet supersenses(lexicographer names)
-        supersenses = list(set([x.lexname() for x in wordnet.all_synsets()]))
+        supersenses = list(set(['supersense=' + x.lexname() for x in wordnet.all_synsets()]))
 
-        # # Framenet
-        # frame_names = [x.name for x in framenet.frames()]
+        # Framenet
+        lem2frame = {}
+        for lm in framenet.lus():
+            for lemma in lm['lexemes']:
+                lem2frame[lemma['name'] + lemma['POS']] = lm['frame']['name']
+        frame_names = ['frame=' + x.name for x in framenet.frames()]
 
+        # Verbnet classids
+        verbnet_classids = ['classid=' + vcid for vcid in verbnet.classids()]
+
+        # Lexical features    
         lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
 
-        for f in verbnet.classids() + lexical_feats + supersenses:
+        for f in verbnet_classids + lexical_feats + supersenses:
             dict_feats[f] = 0
         for a in feature_cols.keys():
             dict_feats[a] = 0
             dict_feats[a + "_dep"] = 0
 
-        x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs) for sent, token, lemma in zip(raw_x, tokens, lemmas)])
+        x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_x, tokens, lemmas)])
         y = {}
         for attr in attributes:
             y[attr] = data[attr_map[attr] + ".norm"].values
 
-        dev_x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs) for sent, token, lemma in zip(raw_dev_x, dev_tokens, dev_lemmas)])
+        dev_x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_dev_x, dev_tokens, dev_lemmas)])
 
         # Figure out which columns to drop(they're always zero)
         todrop1 = dev_x_pd.columns[(dev_x_pd == 0).all()].values.tolist()
@@ -255,18 +273,44 @@ if __name__ == "__main__":
         for attr in attributes:
             dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
 
-        fout = open(args.prot + 'baseline.pkl', 'wb')
-        pickle.dump([x, y, dev_x, dev_y, data, data_dev_mean], fout)
-        fout.close()
-        sys.exit(0)
+        # get elmo values here
+        x_elmo = get_elmo(sentences, tokens=tokens, batch_size=args.batch_size)
+        dev_x_elmo = get_elmo(dev_sentences, tokens=dev_tokens, batch_size=args.batch_size)
+
+        with open(args.prot + 'baseline.pkl', 'wb') as fout, open(args.prot + 'train_elmo.pkl', 'wb') as train_elmo, open(args.prot + 'dev_elmo.pkl', 'wb') as dev_elmo:
+            pickle.dump([x, y, dev_x, dev_y, data, data_dev_mean], fout)
+            pickle.dump(x_elmo, train_elmo)
+            pickle.dump(dev_x_elmo, dev_elmo)
+
+        sys.exit("Data has been loaded and pickled")
 
     fin = open(args.prot + 'baseline.pkl', 'rb')
     x, y, dev_x, dev_y, data, data_dev_mean = pickle.load(fin)
+    fin.close()
+
+    tr_elmo = open(args.prot + 'train_elmo.pkl', 'rb')
+    x_elmo = pickle.load(tr_elmo)
+    tr_elmo.close()
+
+    dev_elmo = open(args.prot + 'dev_elmo.pkl', 'rb')
+    dev_x_elmo = pickle.load(dev_elmo)
+    dev_elmo.close()
 
     if args.model == "mlp":
-        classifier = MLPClassifier()
+        if args.hand and not args.embed:
+            pass
+        elif not args.hand and args.embed:
+            x = x_elmo
+            dev_x = dev_x_elmo
+        elif args.hand and args.embed:
+            x = np.concatenate((x, x_elmo), axis=1)
+            dev_x = np.concatenate((dev_x, dev_x_elmo), axis=1)
+        else:
+            sys.exit('Choose a represenation for x')
 
-        parameters = {'hidden_layer_sizes': [(256, 32), (512, 64), (512, 32)], 'alpha': [0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'activation': ['tanh', 'relu']}
+        classifier = MLPClassifier()
+        parameters = {'hidden_layer_sizes': [(256, 32), (512), (512, 32), (256)], 'alpha': [0, 0.0001, 0.001, 0.01], 'early_stopping': [True], 'activation': ['tanh', 'relu'], 'learning_rate_init': [0.0001, 0.001, 0.01]}
+        # best_params = {}
 
         y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
         dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
@@ -275,10 +319,11 @@ if __name__ == "__main__":
         all_y = np.concatenate((y, dev_y), axis=0)
         test_fold = [-1 for i in range(len(x))] + [0 for j in range(len(dev_x))]
         ps = PredefinedSplit(test_fold=test_fold)
-        clf = GridSearchCV(classifier, parameters, n_jobs=-1, verbose=1, cv=ps)
+        clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=ps, return_train_score=True)
         clf.fit(all_x, all_y)
         print(clf.best_params_)
-        # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
+
+        # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_train_score']):
         #         print(p, np.round(tr, sigdig))
 
         y_pred_dev = clf.predict(dev_x)
@@ -286,10 +331,10 @@ if __name__ == "__main__":
             print(attr_map[attr])
             mode_ = mode(dev_y[:, ind])[0][0]
             print("Accuracy mode =", mode_, ":", np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))]), sigdig))
-            print("Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), "\n",
-                  "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), "\n",
-                  "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), "\n",
-                  "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), "\n")
+            print("Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                  "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                  "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                  "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
     else:
         if args.model == "lr":
             classifier = LR()
@@ -308,7 +353,7 @@ if __name__ == "__main__":
 
             all_y = np.concatenate((y[attr], dev_y[attr]))
             all_loss_wts = np.concatenate((loss_wts, dev_loss_wts))
-            clf = GridSearchCV(classifier, parameters, n_jobs=-1, verbose=1, cv=ps, fit_params={'sample_weight': all_loss_wts})
+            clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=ps, fit_params={'sample_weight': all_loss_wts})
             clf.fit(all_x, all_y)
 
             y_pred_dev = clf.predict(dev_x)
