@@ -1,13 +1,13 @@
 #!/bin/bash
-python run_baseline.py --prot arg --hand --embed
+python run_baseline.py --search --prot arg --hand --embed
 sleep 5
-python run_baseline.py --prot pred --hand --embed
+python run_baseline.py --search --prot pred --hand --embed
 sleep 5
-python run_baseline.py --prot arg --hand
+python run_baseline.py --search --prot arg --hand
 sleep 5
-python run_baseline.py --prot pred --hand
+python run_baseline.py --search --prot pred --hand
 sleep 5
-python run_baseline.py --prot arg --embed
+python run_baseline.py --search --prot arg --embed
 sleep 5
-python run_baseline.py --prot pred --embed
+python run_baseline.py --search --prot pred --embed
 sleep 5

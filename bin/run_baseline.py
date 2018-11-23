@@ -8,10 +8,10 @@ from sklearn.metrics import accuracy_score as accuracy, precision_score as preci
 from sklearn.utils import shuffle
 from predpatt import load_conllu, PredPatt, PredPattOpts
 from os.path import expanduser
-from sklearn.model_selection import GridSearchCV, PredefinedSplit
+from sklearn.model_selection import GridSearchCV, PredefinedSplit, RandomizedSearchCV
 from collections import Counter
 from factslab.utility import ridit, dev_mode_group, get_elmo
-from scipy.stats import mode
+from scipy.stats import mode, uniform
 import warnings
 import pickle
 from nltk.stem import WordNetLemmatizer
@@ -133,6 +133,9 @@ if __name__ == "__main__":
     parser.add_argument('--embed',
                         action='store_true',
                         help='Turn on elmo/glove embeddings')
+    parser.add_argument('--search',
+                        action='store_true',
+                        help='Run grid search')
 
     sigdig = 3
     # parse arguments
@@ -245,7 +248,7 @@ if __name__ == "__main__":
         # Verbnet classids
         verbnet_classids = ['classid=' + vcid for vcid in verbnet.classids()]
 
-        # Lexical features    
+        # Lexical features
         lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
 
         for f in verbnet_classids + lexical_feats + supersenses:
@@ -296,21 +299,21 @@ if __name__ == "__main__":
     dev_x_elmo = pickle.load(dev_elmo)
     dev_elmo.close()
 
-    if args.model == "mlp":
-        if args.hand and not args.embed:
+    if args.hand and not args.embed:
             pass
-        elif not args.hand and args.embed:
-            x = x_elmo
-            dev_x = dev_x_elmo
-        elif args.hand and args.embed:
-            x = np.concatenate((x, x_elmo), axis=1)
-            dev_x = np.concatenate((dev_x, dev_x_elmo), axis=1)
-        else:
-            sys.exit('Choose a represenation for x')
+    elif not args.hand and args.embed:
+        x = x_elmo
+        dev_x = dev_x_elmo
+    elif args.hand and args.embed:
+        x = np.concatenate((x, x_elmo), axis=1)
+        dev_x = np.concatenate((dev_x, dev_x_elmo), axis=1)
+    else:
+        sys.exit('Choose a represenation for x')
 
+    if args.model == "mlp":
         classifier = MLPClassifier()
-        parameters = {'hidden_layer_sizes': [(256, 32), (512), (512, 32), (256)], 'alpha': [0, 0.0001, 0.001, 0.01], 'early_stopping': [True], 'activation': ['tanh', 'relu'], 'learning_rate_init': [0.0001, 0.001, 0.01]}
-        # best_params = {}
+        grid_params = {'hidden_layer_sizes': [(512, 32), (256, 32), (256,), (512,)], 'alpha': [0, 0.0001, 0.001, 0.01], 'early_stopping': [True], 'activation': ['relu'], 'learning_rate_init': [0.001], 'batch_size': [32, 64]}
+        best_params = {'hidden_layer_sizes': (512, 32), 'alpha': 0.001, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32}
 
         y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
         dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
@@ -319,12 +322,16 @@ if __name__ == "__main__":
         all_y = np.concatenate((y, dev_y), axis=0)
         test_fold = [-1 for i in range(len(x))] + [0 for j in range(len(dev_x))]
         ps = PredefinedSplit(test_fold=test_fold)
-        clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=ps, return_train_score=True)
-        clf.fit(all_x, all_y)
-        print(clf.best_params_)
-
-        # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_train_score']):
+        if args.search:
+            parameters = grid_params
+            clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=2)
+            clf.fit(x, y)
+            print(clf.best_params_)
+            # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_train_score']):
         #         print(p, np.round(tr, sigdig))
+        else:
+            clf = classifier.set_params(**best_params)
+            clf.fit(x, y)
 
         y_pred_dev = clf.predict(dev_x)
         for ind, attr in enumerate(attributes):
@@ -338,7 +345,8 @@ if __name__ == "__main__":
     else:
         if args.model == "lr":
             classifier = LR()
-            parameters = {'C': [0.01, 0.1, 0.5, 1, 10, 100], 'penalty': ['l1', 'l2']}
+            parameters = {'C': uniform(loc=1, scale=1), 'penalty': ['l1', 'l2']}
+            best_params = {'C': 1.05, 'penalty': 'l1'}
         elif args.model == "svm":
             classifier = LinearSVC()
             parameters = {'C': [0.01, 0.1, 0.5, 1, 10, 100]}
@@ -353,8 +361,13 @@ if __name__ == "__main__":
 
             all_y = np.concatenate((y[attr], dev_y[attr]))
             all_loss_wts = np.concatenate((loss_wts, dev_loss_wts))
-            clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=ps, fit_params={'sample_weight': all_loss_wts})
-            clf.fit(all_x, all_y)
+            if args.search:
+                clf = RandomizedSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=ps, fit_params={'sample_weight': all_loss_wts})
+                clf.fit(all_x, all_y)
+                print(clf.best_params_)
+            else:
+                clf = classifier.set_params(**best_params)
+                clf.fit(x, y[attr])
 
             y_pred_dev = clf.predict(dev_x)
             print(attr_map[attr])
