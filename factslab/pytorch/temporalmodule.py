@@ -6,6 +6,7 @@ import torch.optim as optim
 
 from torch.nn import Parameter
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
+from torch.distributions.binomial import Binomial
 
 
 import pandas as pd
@@ -27,7 +28,7 @@ options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_5
 weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
 
 #elmo = Elmo(options_file, weight_file, 1, dropout=0, requires_grad=False)  #using 1 layer of representation
-elmo = ElmoEmbedder(options_file, weight_file, cuda_device=1)
+elmo = ElmoEmbedder(options_file, weight_file, cuda_device=2)
 # elmo = ElmoEmbedder(options_file, weight_file)
 
 class TemporalModel(torch.nn.Module):
@@ -41,6 +42,9 @@ class TemporalModel(torch.nn.Module):
     '''
     def __init__(self, embedding_size=1024, 
                 tune_embed_size=300,
+                mlp_dropout = 0.5,
+                mlp_activation="tanh",
+                duration_distr = False,
                 attention=True, event_attention='root', dur_attention = 'param', 
                 rel_attention = 'param', dur_MLP_sizes = [24], fine_MLP_sizes = [24],
                 coarse_MLP_sizes = [24], dur_output_size = 11, fine_output_size = 4,
@@ -55,16 +59,24 @@ class TemporalModel(torch.nn.Module):
         self.event_attention = event_attention
         self.dur_attention = dur_attention
         self.rel_attention = rel_attention
-        
+        self.mlp_activation = mlp_activation
+        self.duration_distr = duration_distr
+        self.dur_output_size = dur_output_size
+
         #initialize embedding-tuning MLP
         self.tuned_embed_MLP = nn.Linear(self.embedding_size*3, self.tuned_embed_size)
-
+        self.mlp_dropout =  nn.Dropout(mlp_dropout) 
         #Initialize attention parameters
         self._init_attention()
 
         # initialize MLP layers
         self.linear_maps = nn.ModuleDict()
-        self._init_MLP(tune_embed_size,dur_MLP_sizes,dur_output_size, param="duration")
+
+        if self.duration_distr:
+            self._init_MLP(tune_embed_size,dur_MLP_sizes,1, param="duration")
+        else:
+            self._init_MLP(tune_embed_size,dur_MLP_sizes,dur_output_size, param="duration")
+
         self._init_MLP(tune_embed_size, fine_MLP_sizes, fine_output_size, param="fine")
         self._init_MLP(tune_embed_size, coarse_MLP_sizes,coarse_output_size, param="coarse")
 
@@ -178,18 +190,46 @@ class TemporalModel(torch.nn.Module):
         rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
 
         #Run Duration-MLP
-        pred1_dur = self._run_regression(pred1_dur, param="duration")
-        pred2_dur = self._run_regression(pred2_dur, param="duration")
+        pred1_dur = self._run_regression(pred1_dur, param="duration", activation=self.mlp_activation)
+        pred2_dur = self._run_regression(pred2_dur, param="duration", activation=self.mlp_activation)
+
+        if self.duration_distr:
+            pred1_dur = self._binomial_dist(pred1_dur)
+            pred2_dur = self._binomial_dist(pred2_dur)
 
         #Run Fine-grained-MLP
-        fine_output = self._run_regression(rel_output, param="fine", activation="sigmoid")
+        fine_output = self._run_regression(rel_output, param="fine", activation=self.mlp_activation)
+        # fine_output[:,1] = fine_output[:,0] + fine_output[:,1]
+        # fine_output[:,3] = fine_output[:,2] + fine_output[:,3]
+        # fine_output = torch.sigmoid(fine_output)
 
         #Run Coarse-grained MLP
-        coarse_output = self._run_regression(rel_output, param="coarse")
+        coarse_output = self._run_regression(rel_output, param="coarse", activation=self.mlp_activation)
 
         y_hat = (pred1_dur, pred2_dur, fine_output, coarse_output)
 
         return y_hat
+
+    def _binomial_dist(self, pred_dur):
+        '''
+        Input: A tensor with dimension: batch_size x 1
+        Output: A tensor with dimension: batch_size x 11 
+        Binomial Prob distribution for a given duration value 
+
+        '''
+        pred_dur = torch.sigmoid(pred_dur)
+
+        dur_size = self.dur_output_size
+        batch_size = pred_dur.size()[0]
+
+        ans = torch.zeros((batch_size, dur_size)).to(self.device)
+        durations = torch.tensor(range(dur_size), dtype=torch.float).to(self.device)
+
+        for i,m in enumerate(pred_dur):
+            bin_class = Binomial(total_count=10, probs=m)
+            ans[i,:] = bin_class.log_prob(durations)
+
+        return ans
 
     def _tune_embeddings(self, inputs):
         return torch.tanh(self.tuned_embed_MLP(inputs))
@@ -260,6 +300,7 @@ class TemporalModel(torch.nn.Module):
         elif self.event_attention == "constant" :
             pred1_span_inputs = self._extract_span_inputs(inputs, pred1_spans)
             att_raw = self.event_att_map(pred1_span_inputs)
+            att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, pred1_span_inputs.shape[1]), dim=1)
             pred1_context = torch.bmm(att[:, None, :], pred1_span_inputs).squeeze()
            
@@ -270,6 +311,7 @@ class TemporalModel(torch.nn.Module):
             att_span = self.event_att_map(pred1_root)
             att_span = self._regression_nonlinearity(att_span)
             att_raw = torch.bmm(pred1_span_inputs, att_span[:, :, None])
+            att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, pred1_span_inputs.shape[1]), dim=1)
             pred1_context = torch.bmm(att[:, None, :], pred1_span_inputs).squeeze()
            
@@ -290,6 +332,7 @@ class TemporalModel(torch.nn.Module):
 
         elif self.dur_attention == "constant":
             att_raw = self.dur_att_map(inputs)
+            att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, inputs.shape[1]), dim=1)
             dur_context = torch.bmm(att[:, None, :], inputs).squeeze()
 
@@ -302,6 +345,7 @@ class TemporalModel(torch.nn.Module):
             att_raw = torch.bmm(inputs, att_span[:, :, None])
             # print("Attention raw dim: {}".format(att_raw.size()))
             # print("Attention raw softm dim: {}".format(att_raw.view(batch_size, inputs.shape[1]).size()))
+            att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, inputs.shape[1]), dim=1)
             dur_context = torch.bmm(att[:, None, :], inputs).squeeze()
 
@@ -325,6 +369,7 @@ class TemporalModel(torch.nn.Module):
 
         elif self.rel_attention == "constant":
             att_raw = self.rel_att_map(inputs)
+            att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, inputs.shape[1]), dim=1)
             rel_context = torch.bmm(att[:, None, :], inputs).squeeze()
 
@@ -334,6 +379,7 @@ class TemporalModel(torch.nn.Module):
             att_span = self.rel_att_map(torch.cat((pred1_in, pred2_in), dim=1))
             att_span = self._regression_nonlinearity(att_span)
             att_raw = torch.bmm(inputs, att_span[:, :, None])
+            att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, inputs.shape[1]), dim=1)
             rel_context = torch.bmm(att[:, None, :], inputs).squeeze()
 
@@ -348,14 +394,19 @@ class TemporalModel(torch.nn.Module):
         return inputs
  
     def _run_regression(self, h_last, param=None, activation=None):
+
         for i, linear_map in enumerate(self.linear_maps[param]):
             if i:
                 if activation == "sigmoid":
                     h_last = torch.sigmoid(h_last)
+                    h_last = self.mlp_dropout(h_last)
                 elif activation == "relu":
                     h_last = F.relu(h_last)
+                    h_last = self.mlp_dropout(h_last)                  
                 else:
                     h_last = torch.tanh(h_last)
+                    h_last = self.mlp_dropout(h_last)
+
             h_last = linear_map(h_last)
 
         if param=="fine":
@@ -388,7 +439,7 @@ class TemporalTrainer(object):
                  predict_batch_size = 256,
                  epochs=5,
                  logmax = 0.9999999,
-                 model_file_suffix = "",
+                 model_file_suffix = ".pth",
                 **kwargs):
         
         self.epochs = epochs
@@ -401,7 +452,11 @@ class TemporalTrainer(object):
         self.best_model_file = model_file_prefix + "model_" + kwargs['event_attention'] +  \
                                 "_" + kwargs['dur_attention'] +  \
                                 "_" + kwargs['rel_attention'] + \
-                                "_" + model_file_suffix
+                                "_" + "_".join([str(x) for x in kwargs['dur_MLP_sizes']]) + \
+                                "_" + str(kwargs['mlp_dropout']) + "_" + kwargs['mlp_activation'] + \
+                                "_binom_" + str(kwargs['duration_distr']) + "_coarsesize_" + \
+                                str(kwargs['coarse_output_size']) +\
+                                model_file_suffix
 
         self._regression_type = regression_type
         self._optimizer_class = optimizer_class
@@ -480,12 +535,12 @@ class TemporalTrainer(object):
 
         L1_p2 = self.duration_loss(out_p2_d, pred2_durs)
         L1_p2 = torch.mm(pred2_conf.unsqueeze(0), L1_p2.unsqueeze(1))/batch_size
-        #print("L1_p1 {},  L1_p2: {}".format(L1_p1, L1_p2))
+        # print("L1_p1 {},  L1_p2: {}".format(L1_p1, L1_p2))
 
         L6 = self.coarse_loss(out_c, time_ml)
         L6 = torch.mm(rel_conf.unsqueeze(0), L6.unsqueeze(1))/batch_size
 
-        #print("L6 : {}".format(L6))
+        # print("L6 : {}".format(L6))
         max_tensor = torch.ones((batch_size,)).to(self.device)
         max_tensor = max_tensor.new_full((batch_size,1), self.logmax)
         max_tensor = max_tensor.view(batch_size)
@@ -495,15 +550,19 @@ class TemporalTrainer(object):
         L3 = torch.min(self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2], e_p1-b_p2), max_tensor)
         L4 = torch.min(self.fine_loss(out_f[:, 2]+out_f[:, 3]-out_f[:, 0], e_p2-b_p1), max_tensor)
         L5 = torch.min(self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2]-out_f[:, 3], e_p1-e_p2), max_tensor)
+        # L2 = torch.min(self.fine_loss(out_f[:, 0]-out_f[:, 2], b_p1-b_p2), max_tensor)
+        # L3 = torch.min(self.fine_loss(out_f[:, 1]-out_f[:, 2], e_p1-b_p2), max_tensor)
+        # L4 = torch.min(self.fine_loss(out_f[:, 3]-out_f[:, 0], e_p2-b_p1), max_tensor)
+        # L5 = torch.min(self.fine_loss(out_f[:, 1]-out_f[:, 3], e_p1-e_p2), max_tensor)
 
-        #print("L2 {}, L3 {}, L4 {}, L5 {}".format(L2, L3, L4, L5))
+        # print("L2 {}, L3 {}, L4 {}, L5 {}".format(L2, L3, L4, L5))
 
         L2to5 = sum([-torch.log(1-L2), -torch.log(1-L3), 
             -torch.log(1-L4), -torch.log(1-L5)])/4
 
         L2to5 = torch.mm(rel_conf.unsqueeze(0), L2to5.unsqueeze(1))/batch_size
-        #print("L2to5 {}".format(L2to5))
-        #print("final loss: {}".format(sum([(L1_p1+L1_p2)/2,  L6 , L2to5])/3))
+        # print("L2to5 {}".format(L2to5))
+        # print("final loss: {}".format(sum([(L1_p1+L1_p2)/2,  L6 , L2to5])/3))
 
         return (sum([(L1_p1+L1_p2)/2,  L6, L2to5])/3).squeeze()
 
@@ -564,7 +623,8 @@ class TemporalTrainer(object):
         train_accs = []
         best_val_acc = -float('inf')
         best_val_loss = float('inf')
-        
+        bad_count = 0
+
         for epoch in range(self.epochs):
             # Turn on training mode which enables dropout.
             self._model.train()
@@ -575,7 +635,7 @@ class TemporalTrainer(object):
             tqdm.write("Running Epoch: {}".format(epoch+1))
             
             #time print
-            pbar = tqdm_n(total = total_obs//self.train_batch_size)
+            pbar = tqdm(total = total_obs//self.train_batch_size)
             
             while bidx_j < total_obs:
                 words = [p for p,q,r in self._X[bidx_i:bidx_j]]
@@ -632,24 +692,28 @@ class TemporalTrainer(object):
             ## Dev_loss:
             #dev_predicts = self.predict(dev_x)
             dev_loss = self._predict_loss(dev_x, dev_y)
-            
-            #train_acc = spearmanr(train_predicts, Y)
-            #dev_acc = spearmanr(dev_predicts, dev_y)
-            
+        
             # Save the model if the validation loss is the best we've seen so far.
 
             if dev_loss < best_val_loss:
                 with open(self.best_model_file, 'wb') as f:
                     torch.save(self._model.state_dict(), f)
                 best_val_loss = dev_loss
-    
-            tqdm.write("Epoch: {} Loss: {}".format(epoch+1, curr_loss))
-            #tqdm.write("Train spearman correlation: {0:.5f} P-value: {1:.5f}".format(train_acc[0], train_acc[1]))
-            #tqdm.write("Dev spearman correlation: {0:.5f} P-value: {1:.5f}".format(dev_acc[0], dev_acc[1]))
-            tqdm.write("Dev Loss: {}".format(dev_loss))
+            
+            if epoch:
+                if dev_loss > dev_accs[-1]:
+                    bad_count+=1
+                else:
+                    bad_count=0
+            
+            tqdm.write("Epoch No.: {} Last Train-minibatch Loss: {}".format(epoch+1, curr_loss))
+            tqdm.write("Total Dev Loss: {}".format(dev_loss))
             tqdm.write("\n")
             dev_accs.append(dev_loss.detach())
-            #train_accs.append(train_acc[0])
+
+            if bad_count >=2:
+                break
+            
             
         return dev_accs
 
@@ -691,7 +755,7 @@ class TemporalTrainer(object):
                                             rel_conf[bidx_i:bidx_j]
                                             )
                 
-                total_loss += curr_loss
+                total_loss += curr_loss.detach()
                 bidx_i = bidx_j
                 bidx_j = bidx_i + self.predict_loss_batch_size
 
