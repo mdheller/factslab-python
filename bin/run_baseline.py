@@ -10,7 +10,7 @@ from predpatt import load_conllu, PredPatt, PredPattOpts
 from os.path import expanduser
 from sklearn.model_selection import GridSearchCV, PredefinedSplit, RandomizedSearchCV
 from collections import Counter
-from factslab.utility import ridit, dev_mode_group, get_elmo
+from factslab.utility import ridit, dev_mode_group, get_elmo, padding, load_glove_embedding
 from scipy.stats import mode, uniform
 import warnings
 import pickle
@@ -34,21 +34,6 @@ def concreteness_score(concreteness, lemma):
     return score
 
 
-def lcs_score(lcs, lemma):
-    '''
-        Returns eventiveness score(0 or 1)
-    '''
-    if lemma in lcs.verbs:
-        if True in lcs.eventive(lemma):
-            score = 1
-        else:
-            score = 0
-    else:
-        score = -1
-
-    return score
-
-
 def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, l2f):
     lmt = WordNetLemmatizer()
     '''Extract features from a word'''
@@ -60,6 +45,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
 
     all_feats = (feats[token] + '|' + deps_feats).split('|')
     all_feats = list(filter(None, all_feats))
+
     # UD Lexical features
     for f in all_feats:
         dict_feats[f] += 1
@@ -74,7 +60,10 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
         dict_feats['supersense=' + synset.lexname()] = 1
 
     # framenet name
-
+    pos = sent.tokens[token].tag
+    if lemma + '.' + pos in l2f.keys():
+        frame = l2f[lemma + '.' + pos]
+        dict_feats['frame=' + frame] = 1
 
     # Predicate features
     if prot == "pred":
@@ -84,26 +73,43 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
             dict_feats['classid=' + f] = 1
 
         # lcs eventiveness
-        dict_feats['lcs'] = lcs_score(lcs, lemma)
+        if lemma in lcs.verbs:
+            if True in lcs.eventive(lemma):
+                dict_feats['lcs_eventive'] = 1
+            else:
+                dict_feats['lcs_stative'] = 1
 
         # sum of concreteness score of dependents
         dict_feats['concreteness'] = 0
-        for g_lemma in [lmt.lemmatize(x[2].text) for x in sent.tokens[token].dependents]:
-            dict_feats['concreteness'] += concreteness_score(concreteness, g_lemma)
-        if len(sent.tokens[token].dependents):
-            dict_feats['concreteness'] /= len(sent.tokens[token].dependents)
+        dep_c_scores = [concreteness_score(concreteness, g_lemma) for g_lemma in [lmt.lemmatize(x[2].text) for x in sent.tokens[token].dependents]]
+        if len(dep_c_scores):
+            dict_feats['concreteness'] = sum(dep_c_scores) / len(dep_c_scores)
+            dict_feats['max_conc'] = max(dep_c_scores)
+            dict_feats['min_conc'] = min(dep_c_scores)
         else:
             dict_feats['concreteness'] = 2.5
+            dict_feats['max_conc'] = 2.5
+            dict_feats['min_conc'] = 2.5
     # Argument features
     else:
         dict_feats['concreteness'] = concreteness_score(concreteness, lemma)
 
         # lcs eventiveness score and verbnet class of argument head
-        if not sent.tokens[token].gov:
-            dict_feats['lcs'] = -1
-        else:
+        if sent.tokens[token].gov:
             gov_lemma = lmt.lemmatize(sent.tokens[token].gov.text, 'v')
-            dict_feats['lcs'] = lcs_score(lcs, gov_lemma)
+
+            # lexical features of dependent of governor
+            deps_gov = [x[2].text for x in sent.tokens[token].gov.dependents]
+            for f in deps_gov:
+                if f in dict_feats.keys():
+                    dict_feats[f] += 1
+
+            # lcs eventiveness
+            if gov_lemma in lcs.verbs:
+                if True in lcs.eventive(gov_lemma):
+                    dict_feats['lcs_eventive'] = 1
+                else:
+                    dict_feats['lcs_stative'] = 1
 
             for f_lemma in verbnet.classids(lemma=gov_lemma):
                 dict_feats['classid=' + f_lemma] += 1
@@ -130,13 +136,17 @@ if __name__ == "__main__":
     parser.add_argument('--hand',
                         action='store_true',
                         help='Turn on hand engineering feats')
-    parser.add_argument('--embed',
+    parser.add_argument('--elmo',
                         action='store_true',
-                        help='Turn on elmo/glove embeddings')
+                        help='Turn on elmo embeddings')
+    parser.add_argument('--glove',
+                        action='store_true',
+                        help='Turn on glove embeddings')
     parser.add_argument('--search',
                         action='store_true',
                         help='Run grid search')
 
+    framnet_posdict = {'V': 'VERB', 'N': 'NOUN', 'A': 'ADJ', 'ADV': 'ADV', 'PREP': 'ADP', 'NUM': 'NUM', 'INTJ': 'INTJ', 'ART': 'DET', 'C': 'CCONJ', 'SCON': 'SCONJ', 'PRON': 'PRON', 'IDIO': 'X', 'AVP': 'ADV'}
     sigdig = 3
     # parse arguments
     args = parser.parse_args()
@@ -234,6 +244,7 @@ if __name__ == "__main__":
 
         from lcsreader import LexicalConceptualStructureLexicon
         lcs = LexicalConceptualStructureLexicon(home + '/Desktop/protocols/data/verbs-English.lcs')
+        lcs_feats = ['lcs_eventive', 'lcs_stative']
 
         # Wordnet supersenses(lexicographer names)
         supersenses = list(set(['supersense=' + x.lexname() for x in wordnet.all_synsets()]))
@@ -242,7 +253,7 @@ if __name__ == "__main__":
         lem2frame = {}
         for lm in framenet.lus():
             for lemma in lm['lexemes']:
-                lem2frame[lemma['name'] + lemma['POS']] = lm['frame']['name']
+                lem2frame[lemma['name'] + '.' + framnet_posdict[lemma['POS']]] = lm['frame']['name']
         frame_names = ['frame=' + x.name for x in framenet.frames()]
 
         # Verbnet classids
@@ -251,7 +262,7 @@ if __name__ == "__main__":
         # Lexical features
         lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
 
-        for f in verbnet_classids + lexical_feats + supersenses:
+        for f in verbnet_classids + lexical_feats + supersenses + frame_names + lcs_feats:
             dict_feats[f] = 0
         for a in feature_cols.keys():
             dict_feats[a] = 0
@@ -268,7 +279,7 @@ if __name__ == "__main__":
         todrop1 = dev_x_pd.columns[(dev_x_pd == 0).all()].values.tolist()
         todrop = x_pd.columns[(x_pd == 0).all()].values.tolist()
         intdrop = [a for a in todrop if a not in todrop1]
-        cols_to_drop = cols_to_drop = list(set(todrop) - set(intdrop))
+        cols_to_drop = list(set(todrop) - set(intdrop))
 
         x = x_pd.drop(cols_to_drop, axis=1).values
         dev_x = dev_x_pd.drop(cols_to_drop, axis=1).values
@@ -280,14 +291,24 @@ if __name__ == "__main__":
         x_elmo = get_elmo(sentences, tokens=tokens, batch_size=args.batch_size)
         dev_x_elmo = get_elmo(dev_sentences, tokens=dev_tokens, batch_size=args.batch_size)
 
-        with open(args.prot + 'baseline.pkl', 'wb') as fout, open(args.prot + 'train_elmo.pkl', 'wb') as train_elmo, open(args.prot + 'dev_elmo.pkl', 'wb') as dev_elmo:
+        # Now get glove values
+        roots = [sentences[i][tokens[i]] for i in range(len(sentences))]
+        dev_roots = [dev_sentences[i][dev_tokens[i]] for i in range(len(dev_sentences))]
+        vocab = list(set(roots + dev_roots))
+        embed_wts = load_glove_embedding(fpath='/srv/models/pytorch/glove/glove.42B.300d', vocab=vocab, prot=args.prot)
+        x_glove = np.array([embed_wts.loc[word] for word in roots])
+        dev_x_glove = np.array([embed_wts.loc[word] for word in dev_roots])
+
+        with open(args.prot + 'hand.pkl', 'wb') as fout, open(args.prot + 'train_elmo.pkl', 'wb') as train_elmo, open(args.prot + 'dev_elmo.pkl', 'wb') as dev_elmo, open(args.prot + 'train_glove.pkl', 'wb') as train_glove, open(args.prot + 'dev_glove.pkl', 'wb') as dev_glove:
             pickle.dump([x, y, dev_x, dev_y, data, data_dev_mean], fout)
             pickle.dump(x_elmo, train_elmo)
             pickle.dump(dev_x_elmo, dev_elmo)
+            pickle.dump(x_glove, train_glove)
+            pickle.dump(dev_x_glove, dev_glove)
 
         sys.exit("Data has been loaded and pickled")
 
-    fin = open(args.prot + 'baseline.pkl', 'rb')
+    fin = open(args.prot + 'hand.pkl', 'rb')
     x, y, dev_x, dev_y, data, data_dev_mean = pickle.load(fin)
     fin.close()
 
@@ -299,21 +320,42 @@ if __name__ == "__main__":
     dev_x_elmo = pickle.load(dev_elmo)
     dev_elmo.close()
 
-    if args.hand and not args.embed:
-            pass
-    elif not args.hand and args.embed:
+    tr_glove = open(args.prot + 'train_glove.pkl', 'rb')
+    x_glove = pickle.load(tr_glove)
+    tr_glove.close()
+
+    dev_glove = open(args.prot + 'dev_glove.pkl', 'rb')
+    dev_x_glove = pickle.load(dev_glove)
+    dev_glove.close()
+
+    if args.hand and not args.elmo and not args.glove:
+        pass
+    elif not args.hand and args.elmo and not args.glove:
         x = x_elmo
         dev_x = dev_x_elmo
-    elif args.hand and args.embed:
+    elif not args.hand and not args.elmo and args.glove:
+        x = x_glove
+        dev_x = dev_x_glove
+    elif args.hand and args.elmo and not args.glove:
         x = np.concatenate((x, x_elmo), axis=1)
         dev_x = np.concatenate((dev_x, dev_x_elmo), axis=1)
+    elif args.hand and args.elmo and args.glove:
+        x = np.concatenate((x, x_elmo, x_glove), axis=1)
+        dev_x = np.concatenate((dev_x, dev_x_elmo, dev_x_glove), axis=1)
+    elif not args.hand and args.elmo and args.glove:
+        x = np.concatenate((x_elmo, x_glove), axis=1)
+        dev_x = np.concatenate((dev_x_elmo, dev_x_glove), axis=1)
+    elif args.hand and not args.elmo and args.glove:
+        x = np.concatenate((x, x_glove), axis=1)
+        dev_x = np.concatenate((dev_x, dev_x_glove), axis=1)
     else:
         sys.exit('Choose a represenation for x')
 
     if args.model == "mlp":
         classifier = MLPClassifier()
-        grid_params = {'hidden_layer_sizes': [(512, 32), (256, 32), (256,), (512,)], 'alpha': [0, 0.0001, 0.001, 0.01], 'early_stopping': [True], 'activation': ['relu'], 'learning_rate_init': [0.001], 'batch_size': [32, 64]}
-        best_params = {'hidden_layer_sizes': (512, 32), 'alpha': 0.001, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32}
+        grid_params = {'hidden_layer_sizes': [(512, 32), (256, 32), (256,), (512,), (32,)], 'alpha': [0, 0.0001, 0.001, 0.01], 'early_stopping': [True], 'activation': ['relu'], 'learning_rate_init': [0.001], 'batch_size': [32]}
+        rand_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': uniform(loc=1, scale=1), 'early_stopping': [True], 'activation': ['relu'], 'learning_rate_init': [0.001], 'batch_size': [32]}
+        best_params = {'hidden_layer_sizes': (1024, 256), 'alpha': 0.001, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32}
 
         y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
         dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
@@ -324,24 +366,25 @@ if __name__ == "__main__":
         ps = PredefinedSplit(test_fold=test_fold)
         if args.search:
             parameters = grid_params
-            clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=2)
+            clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=5)
             clf.fit(x, y)
             print(clf.best_params_)
             # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_train_score']):
         #         print(p, np.round(tr, sigdig))
         else:
             clf = classifier.set_params(**best_params)
+            import ipdb; ipdb.set_trace()  # breakpoint 4b3a9de7 //
             clf.fit(x, y)
 
         y_pred_dev = clf.predict(dev_x)
         for ind, attr in enumerate(attributes):
             print(attr_map[attr])
             mode_ = mode(dev_y[:, ind])[0][0]
-            print("Accuracy mode =", mode_, ":", np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))]), sigdig))
-            print("Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-                  "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-                  "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-                  "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
+            print("Acc mode", mode_, ":\t", np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))]), sigdig), np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+            "Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+            "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+            "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+            "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
     else:
         if args.model == "lr":
             classifier = LR()
