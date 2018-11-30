@@ -1,8 +1,6 @@
 import argparse
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LogisticRegression as LR
-from sklearn.svm import LinearSVC
 from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1
 from sklearn.utils import shuffle
@@ -10,14 +8,12 @@ from predpatt import load_conllu, PredPatt, PredPattOpts
 from os.path import expanduser
 from sklearn.model_selection import GridSearchCV, PredefinedSplit, RandomizedSearchCV
 from collections import Counter
-from factslab.utility import ridit, dev_mode_group, get_elmo, padding, load_glove_embedding
+from factslab.utility import ridit, dev_mode_group, get_elmo, load_glove_embedding
 from scipy.stats import mode, uniform
-import warnings
 import pickle
-from nltk.stem import WordNetLemmatizer
 from nltk.corpus import wordnet, framenet, verbnet
 import sys
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+import joblib
 
 
 def concreteness_score(concreteness, lemma):
@@ -35,10 +31,10 @@ def concreteness_score(concreteness, lemma):
 
 
 def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, l2f):
-    lmt = WordNetLemmatizer()
     '''Extract features from a word'''
     sent = sent_feat[0]
-    feats = sent_feat[1]
+    feats = sent_feat[1][0]
+    all_lemmas = sent_feat[1][1]
     deps = [x[2] for x in sent.tokens[token].dependents]
     deps_text = [x[2].text for x in sent.tokens[token].dependents]
     deps_feats = '|'.join([(a + "_dep") for x in deps for a in feats[x.position].split('|')])
@@ -79,9 +75,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
             else:
                 dict_feats['lcs_stative'] = 1
 
-        # sum of concreteness score of dependents
-        dict_feats['concreteness'] = 0
-        dep_c_scores = [concreteness_score(concreteness, g_lemma) for g_lemma in [lmt.lemmatize(x[2].text) for x in sent.tokens[token].dependents]]
+        dep_c_scores = [concreteness_score(concreteness, g_lemma) for g_lemma in [all_lemmas[x[2].position] for x in sent.tokens[token].dependents]]
         if len(dep_c_scores):
             dict_feats['concreteness'] = sum(dep_c_scores) / len(dep_c_scores)
             dict_feats['max_conc'] = max(dep_c_scores)
@@ -96,7 +90,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
 
         # lcs eventiveness score and verbnet class of argument head
         if sent.tokens[token].gov:
-            gov_lemma = lmt.lemmatize(sent.tokens[token].gov.text, 'v')
+            gov_lemma = all_lemmas[sent.tokens[token].gov.position]
 
             # lexical features of dependent of governor
             deps_gov = [x[2].text for x in sent.tokens[token].gov.dependents]
@@ -128,6 +122,9 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size',
                         type=int,
                         default=128)
+    parser.add_argument('--abl',
+                        type=int,
+                        default=1)
     parser.add_argument('--model',
                         type=str,
                         default='mlp')
@@ -142,6 +139,12 @@ if __name__ == "__main__":
     parser.add_argument('--glove',
                         action='store_true',
                         help='Turn on glove embeddings')
+    parser.add_argument('--token',
+                        action='store_true',
+                        help='Turn on token level features')
+    parser.add_argument('--type',
+                        action='store_true',
+                        help='Turn on type level features')
     parser.add_argument('--search',
                         action='store_true',
                         help='Run grid search')
@@ -181,10 +184,10 @@ if __name__ == "__main__":
 
         # Load the features
         features = {}
-        with open(home + '/Desktop/protocols/data/features.tsv', 'r') as f:
+        with open(home + '/Desktop/protocols/data/features-2.tsv', 'r') as f:
             for line in f.readlines():
                 feats = line.split('\t')
-                features[feats[0]] = feats[1].split()
+                features[feats[0]] = (feats[1].split(), feats[2].split())
 
         # Load the predpatt objects for creating features
         files = ['/Downloads/UD_English-r1.2/en-ud-train.conllu',
@@ -234,14 +237,22 @@ if __name__ == "__main__":
         dev_sentences = data_dev_mean['Sentences'].tolist()
 
         all_x = raw_x + raw_dev_x
-        all_feats = '|'.join(['|'.join(all_x[i][1]) for i in range(len(all_x))])
+        all_feats = '|'.join(['|'.join(all_x[i][1][0]) for i in range(len(all_x))])
         feature_cols = Counter(all_feats.split('|'))
-        dict_feats = {}
 
+        # All UD dataset features
+        all_ud_feature_cols = list(feature_cols.keys()) + [(a + "_dep") for a in feature_cols.keys()]
+
+        # Concreteness
         f = open(home + '/Desktop/protocols/data/concrete.pkl', 'rb')
         concreteness = pickle.load(f)
+        if args.prot == 'arg':
+            conc_cols = ['concreteness']
+        else:
+            conc_cols = ['concreteness', 'max_conc', 'min_conc']
         f.close()
 
+        # LCS eventivity
         from lcsreader import LexicalConceptualStructureLexicon
         lcs = LexicalConceptualStructureLexicon(home + '/Desktop/protocols/data/verbs-English.lcs')
         lcs_feats = ['lcs_eventive', 'lcs_stative']
@@ -262,11 +273,9 @@ if __name__ == "__main__":
         # Lexical features
         lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
 
-        for f in verbnet_classids + lexical_feats + supersenses + frame_names + lcs_feats:
+        dict_feats = {}
+        for f in verbnet_classids + lexical_feats + supersenses + frame_names + lcs_feats + all_ud_feature_cols + conc_cols:
             dict_feats[f] = 0
-        for a in feature_cols.keys():
-            dict_feats[a] = 0
-            dict_feats[a + "_dep"] = 0
 
         x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_x, tokens, lemmas)])
         y = {}
@@ -281,8 +290,10 @@ if __name__ == "__main__":
         intdrop = [a for a in todrop if a not in todrop1]
         cols_to_drop = list(set(todrop) - set(intdrop))
 
-        x = x_pd.drop(cols_to_drop, axis=1).values
-        dev_x = dev_x_pd.drop(cols_to_drop, axis=1).values
+        feature_names = (verbnet_classids, supersenses, frame_names, lcs_feats, conc_cols, lexical_feats, all_ud_feature_cols)
+
+        x_pd = x_pd.drop(cols_to_drop, axis=1)
+        dev_x_pd = dev_x_pd.drop(cols_to_drop, axis=1)
         dev_y = {}
         for attr in attributes:
             dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
@@ -299,8 +310,8 @@ if __name__ == "__main__":
         x_glove = np.array([embed_wts.loc[word] for word in roots])
         dev_x_glove = np.array([embed_wts.loc[word] for word in dev_roots])
 
-        with open(args.prot + 'hand.pkl', 'wb') as fout, open(args.prot + 'train_elmo.pkl', 'wb') as train_elmo, open(args.prot + 'dev_elmo.pkl', 'wb') as dev_elmo, open(args.prot + 'train_glove.pkl', 'wb') as train_glove, open(args.prot + 'dev_glove.pkl', 'wb') as dev_glove:
-            pickle.dump([x, y, dev_x, dev_y, data, data_dev_mean], fout)
+        with open('data/' + args.prot + 'hand.pkl', 'wb') as fout, open('data/' + args.prot + 'train_elmo.pkl', 'wb') as train_elmo, open('data/' + args.prot + 'dev_elmo.pkl', 'wb') as dev_elmo, open('data/' + args.prot + 'train_glove.pkl', 'wb') as train_glove, open('data/' + args.prot + 'dev_glove.pkl', 'wb') as dev_glove:
+            pickle.dump([x_pd, y, dev_x_pd, dev_y, data, data_dev_mean, feature_names, cols_to_drop], fout)
             pickle.dump(x_elmo, train_elmo)
             pickle.dump(dev_x_elmo, dev_elmo)
             pickle.dump(x_glove, train_glove)
@@ -308,26 +319,42 @@ if __name__ == "__main__":
 
         sys.exit("Data has been loaded and pickled")
 
-    fin = open(args.prot + 'hand.pkl', 'rb')
-    x, y, dev_x, dev_y, data, data_dev_mean = pickle.load(fin)
+    fin = open('data/' + args.prot + 'hand.pkl', 'rb')
+    x_pd, y, dev_x_pd, dev_y, data, data_dev_mean, feature_names, cols_to_drop = pickle.load(fin)
     fin.close()
 
-    tr_elmo = open(args.prot + 'train_elmo.pkl', 'rb')
+    verbnet_classids, supersenses, frame_names, lcs_feats, conc_cols, lexical_feats, all_ud_feature_cols = feature_names
+    abl_dict = {0: [], 1: verbnet_classids, 2: supersenses, 3: frame_names, 4: lcs_feats, 5: conc_cols, 6: lexical_feats, 7: all_ud_feature_cols}
+    type_cols = verbnet_classids + supersenses + frame_names + lcs_feats + conc_cols
+    token_cols = lexical_feats + all_ud_feature_cols
+
+    tr_elmo = open('data/' + args.prot + 'train_elmo.pkl', 'rb')
     x_elmo = pickle.load(tr_elmo)
     tr_elmo.close()
 
-    dev_elmo = open(args.prot + 'dev_elmo.pkl', 'rb')
+    dev_elmo = open('data/' + args.prot + 'dev_elmo.pkl', 'rb')
     dev_x_elmo = pickle.load(dev_elmo)
     dev_elmo.close()
 
-    tr_glove = open(args.prot + 'train_glove.pkl', 'rb')
+    tr_glove = open('data/' + args.prot + 'train_glove.pkl', 'rb')
     x_glove = pickle.load(tr_glove)
     tr_glove.close()
 
-    dev_glove = open(args.prot + 'dev_glove.pkl', 'rb')
+    dev_glove = open('data/' + args.prot + 'dev_glove.pkl', 'rb')
     dev_x_glove = pickle.load(dev_glove)
     dev_glove.close()
 
+    if args.type and not args.token:
+        x = x_pd.drop(token_cols, axis=1).values
+        dev_x = dev_x_pd.drop(token_cols, axis=1).values
+    elif not args.type and args.token:
+        x = x_pd.drop(type_cols, axis=1).values
+        dev_x = dev_x_pd.drop(type_cols, axis=1).values
+    else:
+        ablation = [x for x in (type_cols + token_cols) if x not in abl_dict[args.abl]]
+        x = x_pd.drop(x_pd.columns.intersection(ablation), axis=1).values
+        dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(ablation), axis=1).values
+    print("\n" + str(args.abl))
     if args.hand and not args.elmo and not args.glove:
         pass
     elif not args.hand and args.elmo and not args.glove:
@@ -353,9 +380,14 @@ if __name__ == "__main__":
 
     if args.model == "mlp":
         classifier = MLPClassifier()
-        grid_params = {'hidden_layer_sizes': [(512, 32), (256, 32), (256,), (512,), (32,)], 'alpha': [0, 0.0001, 0.001, 0.01], 'early_stopping': [True], 'activation': ['relu'], 'learning_rate_init': [0.001], 'batch_size': [32]}
-        rand_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': uniform(loc=1, scale=1), 'early_stopping': [True], 'activation': ['relu'], 'learning_rate_init': [0.001], 'batch_size': [32]}
-        best_params = {'hidden_layer_sizes': (1024, 256), 'alpha': 0.001, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32}
+        grid_params = [(512, 256), (512, 128), (512, 64), (512, 32), (512,),
+                       (256, 128), (256, 64), (256, 32), (256,),
+                       (128, 64), (128, 32), (128),
+                       (64, 32), (64,),
+                       (32,)]
+        rand_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.00001, 0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'batch_size': [32]}
+        best_params = {'hidden_layer_sizes': (512, 32), 'alpha': 0.01, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32}
+        best_grid_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.0001], 'early_stopping': [True], 'activation': ['relu'], 'batch_size': [32]}
 
         y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
         dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
@@ -364,28 +396,37 @@ if __name__ == "__main__":
         all_y = np.concatenate((y, dev_y), axis=0)
         test_fold = [-1 for i in range(len(x))] + [0 for j in range(len(dev_x))]
         ps = PredefinedSplit(test_fold=test_fold)
+        best_results = []
         if args.search:
-            parameters = grid_params
-            clf = GridSearchCV(classifier, parameters, n_jobs=-3, verbose=1, cv=5)
-            clf.fit(x, y)
-            print(clf.best_params_)
-            # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_train_score']):
-        #         print(p, np.round(tr, sigdig))
+            for hid_size in grid_params:
+                print("=======================")
+                rand_params['hidden_layer_sizes'][0] = hid_size
+                clf = GridSearchCV(classifier, rand_params, n_jobs=-3, verbose=1, cv=5)
+                # clf = GridSearchCV(classifier, grid_params, n_jobs=-1, verbose=1, cv=ps)
+                clf.fit(x, y)
+                y_pred_dev = clf.predict(dev_x)
+                sumacc = 0
+                for ind, attr in enumerate(attributes):
+                    sumacc += np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig)
+                best_results.append((hid_size, clf.best_params_['alpha'], sumacc))
+            print(sorted(best_results, key=lambda x: x[-1]))
         else:
             clf = classifier.set_params(**best_params)
-            import ipdb; ipdb.set_trace()  # breakpoint 4b3a9de7 //
+            # clf = GridSearchCV(classifier, best_params_grid, n_jobs=1, verbose=1, cv=ps)
             clf.fit(x, y)
 
-        y_pred_dev = clf.predict(dev_x)
-        for ind, attr in enumerate(attributes):
-            print(attr_map[attr])
-            mode_ = mode(dev_y[:, ind])[0][0]
-            print("Acc mode", mode_, ":\t", np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))]), sigdig), np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-            "Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-            "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-            "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-            "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
+            y_pred_dev = clf.predict(dev_x)
+            for ind, attr in enumerate(attributes):
+                print(attr_map[attr])
+                mode_ = mode(dev_y[:, ind])[0][0]
+                print("Acc mode", mode_, ":\t", np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))]), sigdig), np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                "Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
     else:
+        from sklearn.linear_model import LogisticRegression as LR
+        from sklearn.svm import LinearSVC
         if args.model == "lr":
             classifier = LR()
             parameters = {'C': uniform(loc=1, scale=1), 'penalty': ['l1', 'l2']}
