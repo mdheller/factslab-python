@@ -49,7 +49,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
     # Lexical item features
     for f in deps_text:
         if f in dict_feats.keys():
-            dict_feats[f] += 1
+            dict_feats[f] = 1
 
     # wordnet supersense of lemma
     for synset in wordnet.synsets(lemma):
@@ -96,7 +96,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
             deps_gov = [x[2].text for x in sent.tokens[token].gov.dependents]
             for f in deps_gov:
                 if f in dict_feats.keys():
-                    dict_feats[f] += 1
+                    dict_feats[f] = 1
 
             # lcs eventiveness
             if gov_lemma in lcs.verbs:
@@ -106,7 +106,13 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
                     dict_feats['lcs_stative'] = 1
 
             for f_lemma in verbnet.classids(lemma=gov_lemma):
-                dict_feats['classid=' + f_lemma] += 1
+                dict_feats['classid=' + f_lemma] = 1
+
+            # framenet name of head
+            pos = sent.tokens[token].gov.tag
+            if gov_lemma + '.' + pos in l2f.keys():
+                frame = l2f[gov_lemma + '.' + pos]
+                dict_feats['frame=' + frame] = 1
 
     return dict_feats
 
@@ -124,7 +130,7 @@ if __name__ == "__main__":
                         default=128)
     parser.add_argument('--abl',
                         type=int,
-                        default=1)
+                        default=0)
     parser.add_argument('--model',
                         type=str,
                         default='mlp')
@@ -184,10 +190,11 @@ if __name__ == "__main__":
 
         # Load the features
         features = {}
+        upos = {}
         with open(home + '/Desktop/protocols/data/features-2.tsv', 'r') as f:
             for line in f.readlines():
                 feats = line.split('\t')
-                features[feats[0]] = (feats[1].split(), feats[2].split())
+                features[feats[0]] = [feats[1].split(), feats[2].split()]
 
         # Load the predpatt objects for creating features
         files = ['/Downloads/UD_English-r1.2/en-ud-train.conllu',
@@ -239,6 +246,10 @@ if __name__ == "__main__":
         all_x = raw_x + raw_dev_x
         all_feats = '|'.join(['|'.join(all_x[i][1][0]) for i in range(len(all_x))])
         feature_cols = Counter(all_feats.split('|'))
+        list_of_all_upos = [[a.split('|')[0] for a in all_x[i][1][0]] for i in range(len(all_x))]
+        list_of_all_lemmas = [all_x[i][1][1] for i in range(len(all_x))]
+        # Lexical features
+        lexical_feats = list(set(sum([[list_of_all_lemmas[i][j] for j in range(len(list_of_all_lemmas[i])) if list_of_all_upos[i][j] in ['UPOS=DET', 'UPOS=AUX']] for i in range(len(list_of_all_lemmas))], [])))
 
         # All UD dataset features
         all_ud_feature_cols = list(feature_cols.keys()) + [(a + "_dep") for a in feature_cols.keys()]
@@ -269,9 +280,6 @@ if __name__ == "__main__":
 
         # Verbnet classids
         verbnet_classids = ['classid=' + vcid for vcid in verbnet.classids()]
-
-        # Lexical features
-        lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
 
         dict_feats = {}
         for f in verbnet_classids + lexical_feats + supersenses + frame_names + lcs_feats + all_ud_feature_cols + conc_cols:
@@ -344,17 +352,20 @@ if __name__ == "__main__":
     dev_x_glove = pickle.load(dev_glove)
     dev_glove.close()
 
-    if args.type and not args.token:
-        x = x_pd.drop(token_cols, axis=1).values
-        dev_x = dev_x_pd.drop(token_cols, axis=1).values
-    elif not args.type and args.token:
-        x = x_pd.drop(type_cols, axis=1).values
-        dev_x = dev_x_pd.drop(type_cols, axis=1).values
-    else:
-        ablation = [x for x in (type_cols + token_cols) if x not in abl_dict[args.abl]]
+    if args.type and not args.token and not args.abl:
+        x = x_pd.drop(x_pd.columns.intersection(token_cols), axis=1).values
+        dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(token_cols), axis=1).values
+    elif not args.type and args.token and not args.abl:
+        x = x_pd.drop(x_pd.columns.intersection(type_cols), axis=1).values
+        dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(type_cols), axis=1).values
+    elif args.abl:
+        ablation = abl_dict[args.abl]
         x = x_pd.drop(x_pd.columns.intersection(ablation), axis=1).values
         dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(ablation), axis=1).values
-    print("\n" + str(args.abl))
+    else:
+        x = x_pd.values
+        dev_x = dev_x_pd.values
+
     if args.hand and not args.elmo and not args.glove:
         pass
     elif not args.hand and args.elmo and not args.glove:
@@ -378,16 +389,12 @@ if __name__ == "__main__":
     else:
         sys.exit('Choose a represenation for x')
 
+    import ipdb; ipdb.set_trace()  # breakpoint 788aaeea //
     if args.model == "mlp":
         classifier = MLPClassifier()
-        grid_params = [(512, 256), (512, 128), (512, 64), (512, 32), (512,),
-                       (256, 128), (256, 64), (256, 32), (256,),
-                       (128, 64), (128, 32), (128),
-                       (64, 32), (64,),
-                       (32,)]
-        rand_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.00001, 0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'batch_size': [32]}
+        grid_params = {'hidden_layer_sizes': [(512, 256), (512, 128), (512, 64), (512, 32), (512,), (256, 128), (256, 64), (256, 32), (256,), (128, 64), (128, 32), (128), (64, 32), (64,), (32,)], 'alpha': [0.00001, 0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'batch_size': [32]}
         best_params = {'hidden_layer_sizes': (512, 32), 'alpha': 0.01, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32}
-        best_grid_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.0001], 'early_stopping': [True], 'activation': ['relu'], 'batch_size': [32]}
+        best_grid_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.01], 'early_stopping': [True], 'activation': ['relu'], 'batch_size': [32]}
 
         y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
         dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
@@ -398,22 +405,17 @@ if __name__ == "__main__":
         ps = PredefinedSplit(test_fold=test_fold)
         best_results = []
         if args.search:
-            for hid_size in grid_params:
-                print("=======================")
-                rand_params['hidden_layer_sizes'][0] = hid_size
-                clf = GridSearchCV(classifier, rand_params, n_jobs=-3, verbose=1, cv=5)
-                # clf = GridSearchCV(classifier, grid_params, n_jobs=-1, verbose=1, cv=ps)
-                clf.fit(x, y)
-                y_pred_dev = clf.predict(dev_x)
-                sumacc = 0
-                for ind, attr in enumerate(attributes):
-                    sumacc += np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig)
-                best_results.append((hid_size, clf.best_params_['alpha'], sumacc))
-            print(sorted(best_results, key=lambda x: x[-1]))
+            print("============================================")
+            clf = GridSearchCV(classifier, grid_params, n_jobs=-3, verbose=1, cv=ps)
+            clf.fit(all_x, all_y)
+            for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
+                print(p['alpha'], p['hidden_layer_sizes'], np.round(tr, sigdig))
+            print("============================================")
         else:
-            clf = classifier.set_params(**best_params)
-            # clf = GridSearchCV(classifier, best_params_grid, n_jobs=1, verbose=1, cv=ps)
-            clf.fit(x, y)
+            # clf = classifier.set_params(**best_params)
+            # clf.fit(x, y)
+            clf = GridSearchCV(classifier, best_grid_params, n_jobs=1, verbose=1, cv=ps)
+            clf.fit(all_x, all_y)
 
             y_pred_dev = clf.predict(dev_x)
             for ind, attr in enumerate(attributes):

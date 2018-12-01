@@ -96,7 +96,7 @@ def eventivity(row):
 
 
 if __name__ == "__main__":
-    path = "/Users/venkat/Downloads/LCS/verbs-English.lcs"
+    path = "/Users/venkat/Desktop/protocols/data/verbs-English.lcs"
     lcs = LexicalConceptualStructureLexicon(path)
 
     # Read annotations
@@ -111,8 +111,6 @@ if __name__ == "__main__":
 
     data = pd.read_csv(datafile, sep="\t")
 
-    data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data[token_col].map(lambda x: str(x))
-
     # Split the datasets into train, dev, test
     data_test = data[data['Split'] == 'test']
     data_dev = data[data['Split'] == 'dev']
@@ -122,7 +120,7 @@ if __name__ == "__main__":
     for resp in response:
         data[resp] = data[resp].astype(int)
 
-    data['lcs_eventive'] = data['Predicate.Lemma'].map(lambda x: lcs.eventive(x) if x in lcs.verbs else -1)
+    data['lcs_eventive'] = data['Lemma'].map(lambda x: lcs.eventive(x) if x in lcs.verbs else -1)
 
     dyn_check = data[data['lcs_eventive'] != -1]
     dyn_check['compare'] = dyn_check.apply(lambda row: eventivity(row), axis=1)
