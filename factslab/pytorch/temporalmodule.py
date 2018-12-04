@@ -22,13 +22,8 @@ from collections import Iterable, defaultdict
 import itertools
 
 #from allennlp.modules.elmo import Elmo, batch_to_ids
-from allennlp.commands.elmo import ElmoEmbedder
-
-options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
-weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
-
 #elmo = Elmo(options_file, weight_file, 1, dropout=0, requires_grad=False)  #using 1 layer of representation
-elmo = ElmoEmbedder(options_file, weight_file, cuda_device=2)
+#elmo = ElmoEmbedder(options_file, weight_file, cuda_device=2)
 # elmo = ElmoEmbedder(options_file, weight_file)
 
 class TemporalModel(torch.nn.Module):
@@ -39,16 +34,20 @@ class TemporalModel(torch.nn.Module):
         - root
         - constant
         - param
+
+    Note: This class doesn't involve any training, so should not be used as a stand-alone
+            class but should be used a sub-class inside the TemporalTrainer class.
     '''
     def __init__(self, embedding_size=1024, 
                 tune_embed_size=300,
                 mlp_dropout = 0.5,
+                elmo_class = None,
                 mlp_activation="tanh",
                 duration_distr = False,
                 attention=True, event_attention='root', dur_attention = 'param', 
                 rel_attention = 'param', dur_MLP_sizes = [24], fine_MLP_sizes = [24],
                 coarse_MLP_sizes = [24], dur_output_size = 11, fine_output_size = 4,
-                coarse_output_size = 7,
+                coarse_output_size = 7, coarser_output_size = 13,
                 device=torch.device(type="cpu") ):
         super().__init__()
 
@@ -62,6 +61,7 @@ class TemporalModel(torch.nn.Module):
         self.mlp_activation = mlp_activation
         self.duration_distr = duration_distr
         self.dur_output_size = dur_output_size
+        self.elmo_class = elmo_class
 
         #initialize embedding-tuning MLP
         self.tuned_embed_MLP = nn.Linear(self.embedding_size*3, self.tuned_embed_size)
@@ -79,6 +79,7 @@ class TemporalModel(torch.nn.Module):
 
         self._init_MLP(tune_embed_size, fine_MLP_sizes, fine_output_size, param="fine")
         self._init_MLP(tune_embed_size, coarse_MLP_sizes,coarse_output_size, param="coarse")
+        self._init_MLP(tune_embed_size, coarse_MLP_sizes, coarser_output_size, param="coarser")
 
     def _init_attention(self):
 
@@ -162,7 +163,7 @@ class TemporalModel(torch.nn.Module):
         
         Inputs are run through multiple attention layers followed by MLP layers
         '''
-        inputs = elmo.batch_to_embeddings(structures)[0].to(self.device)
+        inputs = self.elmo_class.batch_to_embeddings(structures)[0].to(self.device)
         #Concatenate ELMO's layers
         inputs = inputs.view(inputs.size()[0], inputs.size()[2], -1).to(self.device)
 
@@ -199,14 +200,14 @@ class TemporalModel(torch.nn.Module):
 
         #Run Fine-grained-MLP
         fine_output = self._run_regression(rel_output, param="fine", activation=self.mlp_activation)
-        # fine_output[:,1] = fine_output[:,0] + fine_output[:,1]
-        # fine_output[:,3] = fine_output[:,2] + fine_output[:,3]
-        # fine_output = torch.sigmoid(fine_output)
-
+        
         #Run Coarse-grained MLP
         coarse_output = self._run_regression(rel_output, param="coarse", activation=self.mlp_activation)
 
-        y_hat = (pred1_dur, pred2_dur, fine_output, coarse_output)
+        #Run Coarser-grained MLP
+        coarser_output = self._run_regression(rel_output, param="coarser", activation=self.mlp_activation)
+
+        y_hat = (pred1_dur, pred2_dur, fine_output, coarse_output, coarser_output)
 
         return y_hat
 
@@ -215,7 +216,6 @@ class TemporalModel(torch.nn.Module):
         Input: A tensor with dimension: batch_size x 1
         Output: A tensor with dimension: batch_size x 11 
         Binomial Prob distribution for a given duration value 
-
         '''
         pred_dur = torch.sigmoid(pred_dur)
 
@@ -388,7 +388,7 @@ class TemporalModel(torch.nn.Module):
     def _preprocess_inputs(self, inputs):
         """Apply some function(s) to the input embeddings
         This is included to allow for an easy preprocessing hook for
-        RNNRegression subclasses. For instance, we might want to
+        the subclasses. For instance, we might want to
         apply a tanh to the inputs to make them look more like features
         """
         return inputs
@@ -424,6 +424,11 @@ class TemporalModel(torch.nn.Module):
 
 
 class TemporalTrainer(object):
+    '''
+    A class to jointly train :
+    fine-grained real valued temporal relations, coarse-grained classification 
+    labels, and event durations.
+    '''
     
     loss_function_map = {"linear": MSELoss,
                          "robust": L1Loss,
@@ -432,6 +437,7 @@ class TemporalTrainer(object):
     
     def __init__(self, regression_type="robust",
                  optimizer_class=torch.optim.Adam,
+                 optim_wt_decay=0.,
                  device=torch.device(type="cpu"), 
                  model_file_prefix = "",
                  train_batch_size = 4,
@@ -443,7 +449,6 @@ class TemporalTrainer(object):
                 **kwargs):
         
         self.epochs = epochs
-        #self.rnn_class = rnn_class
         self.device = device
         self.train_batch_size = train_batch_size
         self.predict_batch_size = predict_batch_size
@@ -453,9 +458,9 @@ class TemporalTrainer(object):
                                 "_" + kwargs['dur_attention'] +  \
                                 "_" + kwargs['rel_attention'] + \
                                 "_" + "_".join([str(x) for x in kwargs['dur_MLP_sizes']]) + \
+                                "_optim_" + str(optim_wt_decay) + \
                                 "_" + str(kwargs['mlp_dropout']) + "_" + kwargs['mlp_activation'] + \
-                                "_binom_" + str(kwargs['duration_distr']) + "_coarsesize_" + \
-                                str(kwargs['coarse_output_size']) +\
+                                "_binom_" + str(kwargs['duration_distr']) +\
                                 model_file_suffix
 
         self._regression_type = regression_type
@@ -463,6 +468,7 @@ class TemporalTrainer(object):
         self._init_kwargs = kwargs
         self._continuous = regression_type != "multinomial"
         self.logmax = logmax
+        self.optim_wt_decay = optim_wt_decay
 
 
     def _initialize_trainer_model(self):
@@ -503,20 +509,20 @@ class TemporalTrainer(object):
             return [torch.from_numpy(np.array(arg, dtype="int64")).to(self.device) for arg in args]
 
 
-    def _custom_temporal_loss(self, model_out, durations, sliders, time_ml, 
-                                pred1_conf,pred2_conf, rel_conf):
+    def _custom_temporal_loss(self, model_out, durations, sliders, time_ml_coarse, 
+                                time_ml_coarser, pred1_conf,pred2_conf, rel_conf):
         '''
         Calculate L1 to L6 as described in the paper
         '''
         batch_size = len(durations)
-        out_p1_d, out_p2_d, out_f, out_c = model_out
+        out_p1_d, out_p2_d, out_f, out_coarse, out_coarser = model_out
 
         #Store actual_y into tensors
         pred1_durs = [p for p,q in durations]
         pred2_durs = [q for p,q in durations]
 
-        pred1_durs, pred2_durs, time_ml = self._lsts_to_tensors(pred1_durs,pred2_durs,
-                                                                 time_ml)
+        pred1_durs, pred2_durs, time_ml_coarse, time_ml_coarser = self._lsts_to_tensors(pred1_durs,pred2_durs,
+                                                                 time_ml_coarse, time_ml_coarser)
 
         pred1_conf, pred2_conf, rel_conf = self._lsts_to_tensors(pred1_conf,pred2_conf,
                                                                  rel_conf, param="float")
@@ -537,8 +543,13 @@ class TemporalTrainer(object):
         L1_p2 = torch.mm(pred2_conf.unsqueeze(0), L1_p2.unsqueeze(1))/batch_size
         # print("L1_p1 {},  L1_p2: {}".format(L1_p1, L1_p2))
 
-        L6 = self.coarse_loss(out_c, time_ml)
+        #Coarse Loss
+        L6 = self.coarse_loss(out_coarse, time_ml_coarse)
         L6 = torch.mm(rel_conf.unsqueeze(0), L6.unsqueeze(1))/batch_size
+
+        #Coarser Loss
+        L7 = self.coarse_loss(out_coarser, time_ml_coarser)
+        L7 = torch.mm(rel_conf.unsqueeze(0), L7.unsqueeze(1))/batch_size
 
         # print("L6 : {}".format(L6))
         max_tensor = torch.ones((batch_size,)).to(self.device)
@@ -550,11 +561,7 @@ class TemporalTrainer(object):
         L3 = torch.min(self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2], e_p1-b_p2), max_tensor)
         L4 = torch.min(self.fine_loss(out_f[:, 2]+out_f[:, 3]-out_f[:, 0], e_p2-b_p1), max_tensor)
         L5 = torch.min(self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2]-out_f[:, 3], e_p1-e_p2), max_tensor)
-        # L2 = torch.min(self.fine_loss(out_f[:, 0]-out_f[:, 2], b_p1-b_p2), max_tensor)
-        # L3 = torch.min(self.fine_loss(out_f[:, 1]-out_f[:, 2], e_p1-b_p2), max_tensor)
-        # L4 = torch.min(self.fine_loss(out_f[:, 3]-out_f[:, 0], e_p2-b_p1), max_tensor)
-        # L5 = torch.min(self.fine_loss(out_f[:, 1]-out_f[:, 3], e_p1-e_p2), max_tensor)
-
+        
         # print("L2 {}, L3 {}, L4 {}, L5 {}".format(L2, L3, L4, L5))
 
         L2to5 = sum([-torch.log(1-L2), -torch.log(1-L3), 
@@ -564,29 +571,43 @@ class TemporalTrainer(object):
         # print("L2to5 {}".format(L2to5))
         # print("final loss: {}".format(sum([(L1_p1+L1_p2)/2,  L6 , L2to5])/3))
 
-        return (sum([(L1_p1+L1_p2)/2,  L6, L2to5])/3).squeeze()
+        return (sum([(L1_p1+L1_p2)/2,  L6, L2to5, L7])/4).squeeze()
 
-    def fit(self, train_X, train_Y, dev, verbosity=1, **kwargs):
-        """Fit the LSTM regression
+    def fit(self, train_X, train_Y, dev, **kwargs):
+        """Fit the Attention-based model
         Parameters
         ----------
-        X : iterable(iterable(object))
-            a matrix of structures (independent variables) with rows
-            corresponding to a particular kind of RNN
-        Y : numpy.array(Number)
-            a matrix of dependent variables
-        batch_size : int (default: 100)
-        verbosity : int (default: 1)
-            how often to print metrics (never if 0)
+        train_X : iterable(iterable(object))
+                Each row is a list of size 3 with the following items:
+                (i) a list of word tokens in the current sentence
+                (ii) list of size 2 containing predicate_root_tokens for 
+                    both the predicates considered in the sentence
+                (iii) list of size 2 containing predicate_span_tokens for 
+                    both the predicates considered in the sentence
+        train_Y : iterable(iterable(object))
+                Each row is a list of size 6 with the following items:
+                (i) list of size 2 containing duration class for 
+                    both predicates
+                (ii) list of size containing event timelines for both
+                    predicates
+                (iii)coarse-grained classification label
+                (iv) coarser-grained classification label
+                (v) predicate 1 duration confidence (ridit)
+                (vi) predicate 2 duration confidenc (ridit)
+                (vii) relation confidence (ridit)
+        
+        dev: [dev_X, dev_Y]   
+            where dev_X and dev_Y have same configurations as train
         """
         self._X,  self._Y = train_X, train_Y
 
-        durations = [x for x,y,z,p,q,r in self._Y]
-        sliders = [y for x,y,z,p,q,r in self._Y]
-        time_ml = [z for x,y,z,p,q,r in self._Y]
-        pred1_conf = [p for x,y,z,p,q,r in self._Y]
-        pred2_conf = [q for x,y,z,p,q,r in self._Y]
-        rel_conf = [r for x,y,z,p,q,r in self._Y]
+        durations = [x for x,y,z,w,p,q,r in self._Y]
+        sliders = [y for x,y,z,w,p,q,r in self._Y]
+        time_ml_coarse = [z for x,y,z,w,p,q,r in self._Y]
+        time_ml_coarser = [w for x,y,z,w,p,q,r in self._Y]
+        pred1_conf = [p for x,y,z,w,p,q,r in self._Y]
+        pred2_conf = [q for x,y,z,w,p,q,r in self._Y]
+        rel_conf = [r for x,y,z,w,p,q,r in self._Y]
 
         dev_x, dev_y = dev
         
@@ -605,16 +626,16 @@ class TemporalTrainer(object):
         # print("Coarse weights: {}".format(coarse_wts))
         self.coarse_loss = self.coarse_loss.to(self.device)
 
-
         print("########## .   Model Parameters   ##############")
         for name,param in self._model.named_parameters():     
             if param.requires_grad:
                 print(name, param.shape) 
-                print("\n")
         print("##############################################") 
 
         parameters = [p for p in self._model.parameters() if p.requires_grad]
-        optimizer = self._optimizer_class(parameters, **kwargs)
+        optimizer = self._optimizer_class(parameters, 
+                                            weight_decay = self.optim_wt_decay,
+                                        **kwargs)
         
         total_obs = len(self._X)
         dev_obs = len(dev_x)
@@ -651,7 +672,8 @@ class TemporalTrainer(object):
                 curr_loss = self._custom_temporal_loss(model_out, 
                                             durations[bidx_i:bidx_j],
                                             sliders[bidx_i:bidx_j],
-                                            time_ml[bidx_i:bidx_j],
+                                            time_ml_coarse[bidx_i:bidx_j],
+                                            time_ml_coarser[bidx_i:bidx_j],
                                             pred1_conf[bidx_i:bidx_j],
                                             pred2_conf[bidx_i:bidx_j],
                                             rel_conf[bidx_i:bidx_j])
@@ -675,7 +697,8 @@ class TemporalTrainer(object):
                     curr_loss = self._custom_temporal_loss(model_out, 
                                             durations[bidx_i:bidx_j],
                                             sliders[bidx_i:bidx_j],
-                                            time_ml[bidx_i:bidx_j],
+                                            time_ml_coarse[bidx_i:bidx_j],
+                                            time_ml_coarser[bidx_i:bidx_j],
                                             pred1_conf[bidx_i:bidx_j],
                                             pred2_conf[bidx_i:bidx_j],
                                             rel_conf[bidx_i:bidx_j])
@@ -694,7 +717,6 @@ class TemporalTrainer(object):
             dev_loss = self._predict_loss(dev_x, dev_y)
         
             # Save the model if the validation loss is the best we've seen so far.
-
             if dev_loss < best_val_loss:
                 with open(self.best_model_file, 'wb') as f:
                     torch.save(self._model.state_dict(), f)
@@ -710,15 +732,14 @@ class TemporalTrainer(object):
             tqdm.write("Total Dev Loss: {}".format(dev_loss))
             tqdm.write("\n")
             dev_accs.append(dev_loss.detach())
-
+            ## Early Stopping
             if bad_count >=2:
                 break
-            
-            
+        
         return dev_accs
 
     def _predict_loss(self, data_x, data_y):
-        """Predict the temporal loss using the model
+        """Predict the temporal loss using the current model
         Parameters
         ----------
         data_x
@@ -727,12 +748,13 @@ class TemporalTrainer(object):
         # Turn on evaluation mode which disables dropout.
         self._model.eval()
         
-        durations = [x for x,y,z,p,q,r in data_y]
-        sliders = [y for x,y,z,p,q,r in data_y]
-        time_ml = [z for x,y,z,p,q,r in data_y]
-        pred1_conf = [p for x,y,z,p,q,r in data_y]
-        pred2_conf = [q for x,y,z,p,q,r in data_y]
-        rel_conf = [r for x,y,z,p,q,r in data_y]
+        durations = [x for x,y,z,w,p,q,r in data_y]
+        sliders = [y for x,y,z,w,p,q,r in data_y]
+        time_ml_coarse = [z for x,y,z,w,p,q,r in data_y]
+        time_ml_coarser = [w for x,y,z,w,p,q,r in data_y]
+        pred1_conf = [p for x,y,z,w,p,q,r in data_y]
+        pred2_conf = [q for x,y,z,w,p,q,r in data_y]
+        rel_conf = [r for x,y,z,w,p,q,r in data_y]
 
         total_loss = 0
 
@@ -749,7 +771,8 @@ class TemporalTrainer(object):
                 curr_loss = self._custom_temporal_loss(model_out, 
                                             durations[bidx_i:bidx_j],
                                             sliders[bidx_i:bidx_j],
-                                            time_ml[bidx_i:bidx_j],
+                                            time_ml_coarse[bidx_i:bidx_j],
+                                            time_ml_coarser[bidx_i:bidx_j],
                                             pred1_conf[bidx_i:bidx_j],
                                             pred2_conf[bidx_i:bidx_j],
                                             rel_conf[bidx_i:bidx_j]
@@ -767,7 +790,8 @@ class TemporalTrainer(object):
                     curr_loss = self._custom_temporal_loss(model_out, 
                                                 durations[bidx_i:bidx_j],
                                                 sliders[bidx_i:bidx_j],
-                                                time_ml[bidx_i:bidx_j],
+                                                time_ml_coarse[bidx_i:bidx_j],
+                                                time_ml_coarser[bidx_i:bidx_j],
                                                 pred1_conf[bidx_i:bidx_j],
                                                 pred2_conf[bidx_i:bidx_j],
                                                 rel_conf[bidx_i:bidx_j])
@@ -782,9 +806,10 @@ class TemporalTrainer(object):
         # Turn on evaluation mode which disables dropout.
         self._model.eval()
         
-        durations = [x for x,y,z,p,q,r in data_y]
-        sliders = [y for x,y,z,p,q,r in data_y]
-        time_ml = [z for x,y,z,p,q,r in data_y]
+        durations = [x for x,y,z,w,p,q,r in data_y]
+        sliders = [y for x,y,z,w,p,q,r in data_y]
+        time_ml_coarse = [z for x,y,z,w,p,q,r in data_y]
+        time_ml_coarser = [w for x,y,z,w,p,q,r in data_y]
         
         with torch.no_grad():  
             bidx_i = 0
@@ -793,6 +818,7 @@ class TemporalTrainer(object):
             p1_dur_yhat = torch.zeros(total_obs, 11).to(self.device)
             p2_dur_yhat = torch.zeros(total_obs, 11).to(self.device)
             coarse_yhat = torch.zeros(total_obs, 7).to(self.device)
+            coarser_yhat = torch.zeros(total_obs, 13).to(self.device)
 
             while bidx_j < total_obs:
                 words = [p for p,q,r in data_x[bidx_i:bidx_j]]
@@ -802,6 +828,7 @@ class TemporalTrainer(object):
                 p1_dur_yhat[bidx_i:bidx_j] = predicts[0]
                 p2_dur_yhat[bidx_i:bidx_j] = predicts[1]
                 coarse_yhat[bidx_i:bidx_j] = predicts[3]
+                coarser_yhat[bidx_i:bidx_j] = predicts[4]
                 
                 bidx_i = bidx_j
                 bidx_j = bidx_i + self.predict_batch_size
@@ -814,36 +841,54 @@ class TemporalTrainer(object):
                     p1_dur_yhat[bidx_i:bidx_j] = predicts[0]
                     p2_dur_yhat[bidx_i:bidx_j] = predicts[1]
                     coarse_yhat[bidx_i:bidx_j] = predicts[3]
+                    coarser_yhat[bidx_i:bidx_j] = predicts[4]
             
             p1_dur_yhat = F.softmax(p1_dur_yhat, dim=1)
             p2_dur_yhat = F.softmax(p2_dur_yhat, dim=1)
             coarse_yhat = F.softmax(coarse_yhat, dim=1)
+            coarser_yhat = F.softmax(coarser_yhat, dim=1)
 
             _ , p1_dur_yhat =  p1_dur_yhat.max(1)
             _ , p2_dur_yhat =  p2_dur_yhat.max(1)
             _ , coarse_yhat =  coarse_yhat.max(1)
+            _ , coarser_yhat =  coarser_yhat.max(1)
             
-        self._print_metrics(durations, time_ml, p1_dur_yhat.detach().cpu().numpy(),
+        self._print_metrics(durations, time_ml_coarse, time_ml_coarser, 
+                                                p1_dur_yhat.detach().cpu().numpy(),
                                                 p2_dur_yhat.detach().cpu().numpy(),
-                                                coarse_yhat.detach().cpu().numpy())
+                                                coarse_yhat.detach().cpu().numpy(),
+                                                coarser_yhat.detach().cpu().numpy())
 
-        return p1_dur_yhat.detach(), p2_dur_yhat.detach(), coarse_yhat.detach()
+        return p1_dur_yhat.detach(), p2_dur_yhat.detach(), coarse_yhat.detach(), coarser_yhat.detach()
 
-    def _print_metrics(self, durations, time_ml, p1_dur_yhat, p2_dur_yhat, coarse_yhat):
+    def _print_metrics(self, durations, time_ml_coarse, time_ml_coarser,
+                        p1_dur_yhat, p2_dur_yhat, 
+                        coarse_yhat, coarser_yhat):
 
         pred1_durs = [p for p,q in durations]
         pred2_durs = [q for p,q in durations]
-
-        p1_corr = spearmanr(pred1_durs, p1_dur_yhat)
-        p2_corr = spearmanr(pred2_durs, p2_dur_yhat)
-        print("Spearman Correlations:Pred1 dur: {:06.4f}, Pred2 dur:{:06.4f}".format(p1_corr[0], p2_corr[0]))
-        print("P-values: Pred1 dur: {:06.4f}, Pred2 dur:{:06.4f}".format(p1_corr[1], p2_corr[1]))
-
+        
+        pred_durs = np.append(pred1_durs, pred2_durs)
+        pred_dur_yhat = np.append(p1_dur_yhat, p2_dur_yhat)
+        
+        p_corr = spearmanr(pred_durs, pred_dur_yhat)
+        
+        print("Spearman Correlation: Duration: {:04.2%} ".format(p_corr[0]))
+        print("P-values: {:04.2%} ".format(p_corr[1]))
+        
+        print("Coarse")
         for var in ['micro', 'macro']:
-            precision = precision_score(time_ml, coarse_yhat, average=var)
-            recall = recall_score(time_ml, coarse_yhat, average=var)
+            precision = precision_score(time_ml_coarse, coarse_yhat, average=var)
+            recall = recall_score(time_ml_coarse, coarse_yhat, average=var)
             f1 = (2*precision*recall)/(precision+recall)
-            print("{} : Precision: {:06.4f},  Recall:{:06.4f}, F1: {:06.4f}".format(var, precision, recall, f1))
+            print("{} : Precision, Recall, F1: {:04.2%}, {:04.2%}, {:04.2%}".format(var, precision, recall, f1))
+                  
+        print("Coarser")
+        for var in ['micro', 'macro']:
+            precision = precision_score(time_ml_coarser, coarser_yhat, average=var)
+            recall = recall_score(time_ml_coarser, coarser_yhat, average=var)
+            f1 = (2*precision*recall)/(precision+recall)
+            print("{} : Precision, Recall, F1: {:04.2%}, {:04.2%}, {:04.2%}".format(var, precision, recall, f1))
 
 
         
