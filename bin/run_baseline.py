@@ -14,6 +14,15 @@ import pickle
 from nltk.corpus import wordnet, framenet, verbnet
 import sys
 import joblib
+np.random.seed(114)
+
+
+def sum_acc(estimator, x_test, y_test):
+    acc = 0
+    y_pred = estimator.predict(x_test)
+    for j in range(3):
+        acc += accuracy(y_test[:, j], y_pred[:, j])
+    return acc
 
 
 def concreteness_score(concreteness, lemma):
@@ -129,6 +138,9 @@ if __name__ == "__main__":
                         type=int,
                         default=128)
     parser.add_argument('--abl',
+                        type=int,
+                        default=0)
+    parser.add_argument('--tokenabl',
                         type=int,
                         default=0)
     parser.add_argument('--model',
@@ -335,6 +347,8 @@ if __name__ == "__main__":
     abl_dict = {0: [], 1: verbnet_classids, 2: supersenses, 3: frame_names, 4: lcs_feats, 5: conc_cols, 6: lexical_feats, 7: all_ud_feature_cols}
     type_cols = verbnet_classids + supersenses + frame_names + lcs_feats + conc_cols
     token_cols = lexical_feats + all_ud_feature_cols
+    abl_names = {0: 'None', 1: 'verbnet', 2: 'supersenses', 3: 'frames', '4': 'lcs', 5: 'conc', 6: 'lexical', 7: 'UD'}
+    token_abl_names = {0: 'None', 1: 'UPOS=', 2: 'XPOS=', 3: 'mood', 4: 'DEPRE', 5: 'U+X'}
 
     tr_elmo = open('data/' + args.prot + 'train_elmo.pkl', 'rb')
     x_elmo = pickle.load(tr_elmo)
@@ -360,6 +374,16 @@ if __name__ == "__main__":
         dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(type_cols), axis=1).values
     elif args.abl:
         ablation = abl_dict[args.abl]
+        x = x_pd.drop(x_pd.columns.intersection(ablation), axis=1).values
+        dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(ablation), axis=1).values
+    elif args.tokenabl:
+        if args.tokenabl == 3:
+            ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] in ['UPOS=', 'XPOS=', 'DEPRE']]
+        elif args.tokenabl == 5:
+            ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] in ['UPOS=', 'XPOS=']]
+        else:
+            ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] == token_abl_names[args.tokenabl]]
+        ablation = type_cols + lexical_feats + ud_feats_to_remove
         x = x_pd.drop(x_pd.columns.intersection(ablation), axis=1).values
         dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(ablation), axis=1).values
     else:
@@ -388,12 +412,12 @@ if __name__ == "__main__":
         dev_x = np.concatenate((dev_x, dev_x_glove), axis=1)
     else:
         sys.exit('Choose a represenation for x')
-
-    import ipdb; ipdb.set_trace()  # breakpoint 788aaeea //
+    print(args.prot, "Elmo:", args.elmo, "glove:", args.glove, "hand:", args.hand, "ablation:", abl_names[args.abl], "token", token_abl_names[args.tokenabl])
     if args.model == "mlp":
         classifier = MLPClassifier()
-        grid_params = {'hidden_layer_sizes': [(512, 256), (512, 128), (512, 64), (512, 32), (512,), (256, 128), (256, 64), (256, 32), (256,), (128, 64), (128, 32), (128), (64, 32), (64,), (32,)], 'alpha': [0.00001, 0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'batch_size': [32]}
-        best_params = {'hidden_layer_sizes': (512, 32), 'alpha': 0.01, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32}
+        random_state = np.random.seed(114)
+        grid_params = {'hidden_layer_sizes': [(512, 256), (512, 128), (512, 64), (512, 32), (512,), (256, 128), (256, 64), (256, 32), (256,), (128, 64), (128, 32), (128), (64, 32), (64,), (32,)], 'alpha': [0.00001, 0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'batch_size': [32], 'random_state': [random_state]}
+        best_params = {'hidden_layer_sizes': (512, 64), 'alpha': 0.01, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32, 'random_state': random_state}
         best_grid_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.01], 'early_stopping': [True], 'activation': ['relu'], 'batch_size': [32]}
 
         y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
@@ -405,27 +429,32 @@ if __name__ == "__main__":
         ps = PredefinedSplit(test_fold=test_fold)
         best_results = []
         if args.search:
-            print("============================================")
-            clf = GridSearchCV(classifier, grid_params, n_jobs=-3, verbose=1, cv=ps)
+            clf = GridSearchCV(classifier, grid_params, n_jobs=-1, verbose=1, cv=ps)
             clf.fit(all_x, all_y)
-            for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
-                print(p['alpha'], p['hidden_layer_sizes'], np.round(tr, sigdig))
+            print(clf.best_params_)
+            # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
+            #     print(p['alpha'], p['hidden_layer_sizes'], np.round(tr, sigdig))
             print("============================================")
         else:
-            # clf = classifier.set_params(**best_params)
-            # clf.fit(x, y)
-            clf = GridSearchCV(classifier, best_grid_params, n_jobs=1, verbose=1, cv=ps)
-            clf.fit(all_x, all_y)
-
+            # for ind, attr in enumerate(attributes):
+            #     print(attr_map[attr])
+            #     mode_ = mode(dev_y[:, ind])[0][0]
+            #     mode_preds = [mode_ for a in range(len(dev_y[:, ind]))]
+            #     print("Acc mode", mode_, ":\t", np.round(accuracy(dev_y[:, ind], mode_preds), sigdig), np.round(accuracy(dev_y[:, ind], mode_preds, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+            #         "Prec mode :\t", np.round(precision(dev_y[:, ind], mode_preds), sigdig), np.round(precision(dev_y[:, ind], mode_preds, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+            #         "Rec mode :\t", np.round(recall(dev_y[:, ind], mode_preds), sigdig), np.round(recall(dev_y[:, ind], mode_preds, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+            #         "F1 mode: \t", np.round(f1(dev_y[:, ind], mode_preds), sigdig), np.round(f1(dev_y[:, ind], mode_preds, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
+            clf = classifier.set_params(**best_params)
+            clf.fit(x, y)
             y_pred_dev = clf.predict(dev_x)
+            print(accuracy(dev_y, y_pred_dev))
             for ind, attr in enumerate(attributes):
                 print(attr_map[attr])
                 mode_ = mode(dev_y[:, ind])[0][0]
-                print("Acc mode", mode_, ":\t", np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))]), sigdig), np.round(accuracy(dev_y[:, ind], [mode_ for a in range(len(dev_y[:, ind]))], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-                "Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-                "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-                "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
-                "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_), sigdig), np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], pos_label=mode_, sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
+                print("Accuracy :\t", np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(accuracy(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                "Precision :\t", np.round(precision(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(precision(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                "Recall :\t", np.round(recall(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(recall(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n",
+                "F1 score: \t", np.round(f1(dev_y[:, ind], y_pred_dev[:, ind]), sigdig), np.round(f1(dev_y[:, ind], y_pred_dev[:, ind], sample_weight=data_dev_mean[attr_conf[attr] + ".norm"].values), sigdig), "\n")
     else:
         from sklearn.linear_model import LogisticRegression as LR
         from sklearn.svm import LinearSVC

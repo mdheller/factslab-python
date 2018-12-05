@@ -8,3 +8,4 @@ dist/
 *.sbatch
 *.lcs
 *.pkl
+results/
