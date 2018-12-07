@@ -7,14 +7,14 @@ from sklearn.utils import shuffle
 from predpatt import load_conllu, PredPatt, PredPattOpts
 from os.path import expanduser
 from sklearn.model_selection import GridSearchCV, PredefinedSplit, RandomizedSearchCV
-from collections import Counter
+from collections import Counter, defaultdict
 from factslab.utility import ridit, dev_mode_group, get_elmo, load_glove_embedding
 from scipy.stats import mode, uniform
 import pickle
 from nltk.corpus import wordnet, framenet, verbnet
 import sys
 import joblib
-np.random.seed(114)
+np.random.RandomState(0)
 
 
 def sum_acc(estimator, x_test, y_test):
@@ -53,46 +53,47 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
 
     # UD Lexical features
     for f in all_feats:
-        dict_feats[f] += 1
+        if f in dict_feats.keys():
+            dict_feats[f] += 1
 
     # Lexical item features
     for f in deps_text:
         if f in dict_feats.keys():
-            dict_feats[f] = 1
+            dict_feats[f] += 1
 
     # wordnet supersense of lemma
     for synset in wordnet.synsets(lemma):
-        dict_feats['supersense=' + synset.lexname()] = 1
+        dict_feats['supersense=' + synset.lexname()] += 1
 
     # framenet name
     pos = sent.tokens[token].tag
     if lemma + '.' + pos in l2f.keys():
         frame = l2f[lemma + '.' + pos]
-        dict_feats['frame=' + frame] = 1
+        dict_feats['frame=' + frame] += 1
 
     # Predicate features
     if prot == "pred":
         # verbnet class
         f_lemma = verbnet.classids(lemma=lemma)
         for f in f_lemma:
-            dict_feats['classid=' + f] = 1
+            dict_feats['classid=' + f] += 1
 
         # lcs eventiveness
         if lemma in lcs.verbs:
             if True in lcs.eventive(lemma):
-                dict_feats['lcs_eventive'] = 1
+                dict_feats['lcs_eventive'] += 1
             else:
-                dict_feats['lcs_stative'] = 1
+                dict_feats['lcs_stative'] += 1
 
         dep_c_scores = [concreteness_score(concreteness, g_lemma) for g_lemma in [all_lemmas[x[2].position] for x in sent.tokens[token].dependents]]
         if len(dep_c_scores):
-            dict_feats['concreteness'] = sum(dep_c_scores) / len(dep_c_scores)
-            dict_feats['max_conc'] = max(dep_c_scores)
-            dict_feats['min_conc'] = min(dep_c_scores)
+            dict_feats['concreteness'] += sum(dep_c_scores) / len(dep_c_scores)
+            dict_feats['max_conc'] += max(dep_c_scores)
+            dict_feats['min_conc'] += min(dep_c_scores)
         else:
-            dict_feats['concreteness'] = 2.5
-            dict_feats['max_conc'] = 2.5
-            dict_feats['min_conc'] = 2.5
+            dict_feats['concreteness'] += 2.5
+            dict_feats['max_conc'] += 2.5
+            dict_feats['min_conc'] += 2.5
     # Argument features
     else:
         dict_feats['concreteness'] = concreteness_score(concreteness, lemma)
@@ -105,23 +106,23 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
             deps_gov = [x[2].text for x in sent.tokens[token].gov.dependents]
             for f in deps_gov:
                 if f in dict_feats.keys():
-                    dict_feats[f] = 1
+                    dict_feats[f] += 1
 
             # lcs eventiveness
             if gov_lemma in lcs.verbs:
                 if True in lcs.eventive(gov_lemma):
-                    dict_feats['lcs_eventive'] = 1
+                    dict_feats['lcs_eventive'] += 1
                 else:
-                    dict_feats['lcs_stative'] = 1
+                    dict_feats['lcs_stative'] += 1
 
             for f_lemma in verbnet.classids(lemma=gov_lemma):
-                dict_feats['classid=' + f_lemma] = 1
+                dict_feats['classid=' + f_lemma] += 1
 
             # framenet name of head
             pos = sent.tokens[token].gov.tag
             if gov_lemma + '.' + pos in l2f.keys():
                 frame = l2f[gov_lemma + '.' + pos]
-                dict_feats['frame=' + frame] = 1
+                dict_feats['frame=' + frame] += 1
 
     return dict_feats
 
@@ -235,27 +236,35 @@ if __name__ == "__main__":
             resp_conf = attr_conf[attr]
             data[resp_conf + ".norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
             data_dev[resp_conf + ".norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
+            data_test[resp_conf + ".norm"] = data_test.groupby('Annotator.ID')[resp_conf].transform(ridit)
             data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
             data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
+            data_test[resp + ".norm"] = data_test[resp].map(lambda x: 1 if x else 0)
 
         # Shuffle the data
         data = shuffle(data).reset_index(drop=True)
         data_dev = shuffle(data_dev).reset_index(drop=True)
         data_test = shuffle(data_test).reset_index(drop=True)
 
+        # Create data in format amenable to extract features from
         raw_x = data['Structure'].tolist()
         tokens = data['Root.Token'].tolist()
         lemmas = data['Lemma'].tolist()
         sentences = data['Sentences'].tolist()
 
         data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf)).reset_index(drop=True)
-
         raw_dev_x = data_dev_mean['Structure'].tolist()
         dev_tokens = data_dev_mean['Root.Token'].tolist()
         dev_lemmas = data_dev_mean['Lemma'].tolist()
         dev_sentences = data_dev_mean['Sentences'].tolist()
 
-        all_x = raw_x + raw_dev_x
+        data_test_mean = data_test.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf)).reset_index(drop=True)
+        raw_test_x = data_dev_mean['Structure'].tolist()
+        test_tokens = data_dev_mean['Root.Token'].tolist()
+        test_lemmas = data_dev_mean['Lemma'].tolist()
+        test_sentences = data_dev_mean['Sentences'].tolist()
+
+        all_x = raw_x
         all_feats = '|'.join(['|'.join(all_x[i][1][0]) for i in range(len(all_x))])
         feature_cols = Counter(all_feats.split('|'))
         list_of_all_upos = [[a.split('|')[0] for a in all_x[i][1][0]] for i in range(len(all_x))]
@@ -267,8 +276,7 @@ if __name__ == "__main__":
         all_ud_feature_cols = list(feature_cols.keys()) + [(a + "_dep") for a in feature_cols.keys()]
 
         # Concreteness
-        f = open(home + '/Desktop/protocols/data/concrete.pkl', 'rb')
-        concreteness = pickle.load(f)
+        concreteness = pd.read_csv(home + "/Desktop/protocols/data/concreteness.tsv", sep="\t")
         if args.prot == 'arg':
             conc_cols = ['concreteness']
         else:
@@ -325,10 +333,9 @@ if __name__ == "__main__":
         # Now get glove values
         roots = [sentences[i][tokens[i]] for i in range(len(sentences))]
         dev_roots = [dev_sentences[i][dev_tokens[i]] for i in range(len(dev_sentences))]
-        vocab = list(set(roots + dev_roots))
-        embed_wts = load_glove_embedding(fpath='/srv/models/pytorch/glove/glove.42B.300d', vocab=vocab, prot=args.prot)
-        x_glove = np.array([embed_wts.loc[word] for word in roots])
-        dev_x_glove = np.array([embed_wts.loc[word] for word in dev_roots])
+        glove_wts = load_glove_embedding(fpath='/srv/models/pytorch/glove/glove.42B.300d', vocab=list(set(roots)), prot=args.prot)
+        x_glove = np.array([glove_wts.loc[word] for word in roots])
+        dev_x_glove = np.array([glove_wts.loc[word] if word in glove_wts.index else glove_wts.loc["_UNK"]for word in dev_roots])
 
         with open('data/' + args.prot + 'hand.pkl', 'wb') as fout, open('data/' + args.prot + 'train_elmo.pkl', 'wb') as train_elmo, open('data/' + args.prot + 'dev_elmo.pkl', 'wb') as dev_elmo, open('data/' + args.prot + 'train_glove.pkl', 'wb') as train_glove, open('data/' + args.prot + 'dev_glove.pkl', 'wb') as dev_glove:
             pickle.dump([x_pd, y, dev_x_pd, dev_y, data, data_dev_mean, feature_names, cols_to_drop], fout)
@@ -378,7 +385,7 @@ if __name__ == "__main__":
         dev_x = dev_x_pd.drop(dev_x_pd.columns.intersection(ablation), axis=1).values
     elif args.tokenabl:
         if args.tokenabl == 3:
-            ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] in ['UPOS=', 'XPOS=', 'DEPRE']]
+            ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] not in ['UPOS=', 'XPOS=', 'DEPRE']]
         elif args.tokenabl == 5:
             ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] in ['UPOS=', 'XPOS=']]
         else:
@@ -412,13 +419,13 @@ if __name__ == "__main__":
         dev_x = np.concatenate((dev_x, dev_x_glove), axis=1)
     else:
         sys.exit('Choose a represenation for x')
-    print(args.prot, "Elmo:", args.elmo, "glove:", args.glove, "hand:", args.hand, "ablation:", abl_names[args.abl], "token", token_abl_names[args.tokenabl])
+
     if args.model == "mlp":
         classifier = MLPClassifier()
-        random_state = np.random.seed(114)
+        random_state = np.random.RandomState(0)
         grid_params = {'hidden_layer_sizes': [(512, 256), (512, 128), (512, 64), (512, 32), (512,), (256, 128), (256, 64), (256, 32), (256,), (128, 64), (128, 32), (128), (64, 32), (64,), (32,)], 'alpha': [0.00001, 0.0001, 0.001, 0.01, 0.1], 'early_stopping': [True], 'batch_size': [32], 'random_state': [random_state]}
-        best_params = {'hidden_layer_sizes': (512, 64), 'alpha': 0.01, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32, 'random_state': random_state}
-        best_grid_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.01], 'early_stopping': [True], 'activation': ['relu'], 'batch_size': [32]}
+        best_params = {'hidden_layer_sizes': (512, 32), 'alpha': 0.001, 'early_stopping': True, 'activation': 'relu', 'batch_size': 32, 'random_state': random_state}
+        best_grid_params = {'hidden_layer_sizes': [(512, 32)], 'alpha': [0.0001], 'early_stopping': [True], 'activation': ['relu'], 'batch_size': [32]}
 
         y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
         dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
@@ -429,7 +436,7 @@ if __name__ == "__main__":
         ps = PredefinedSplit(test_fold=test_fold)
         best_results = []
         if args.search:
-            clf = GridSearchCV(classifier, grid_params, n_jobs=-1, verbose=1, cv=ps)
+            clf = GridSearchCV(classifier, grid_params, n_jobs=-1, verbose=1, cv=ps, refit=False)
             clf.fit(all_x, all_y)
             print(clf.best_params_)
             # for p, tr in zip(clf.cv_results_['params'], clf.cv_results_['mean_test_score']):
@@ -447,7 +454,7 @@ if __name__ == "__main__":
             clf = classifier.set_params(**best_params)
             clf.fit(x, y)
             y_pred_dev = clf.predict(dev_x)
-            print(accuracy(dev_y, y_pred_dev))
+            print(np.round(f1(dev_y, y_pred_dev, average='micro'), sigdig), np.round(f1(dev_y, y_pred_dev, average='macro'), sigdig))
             for ind, attr in enumerate(attributes):
                 print(attr_map[attr])
                 mode_ = mode(dev_y[:, ind])[0][0]

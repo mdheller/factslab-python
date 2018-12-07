@@ -43,12 +43,10 @@ if __name__ == "__main__":
 
     data = pd.read_csv(datafile, sep="\t")
 
-    # data['SentenceID.Token'] = data['Sentence.ID'].map(lambda x: x) + "_" + data[token_col].map(lambda x: str(x))
-
     # Split the datasets into train, dev, test
-    # data_test = data[data['Split'] == 'test']
-    # data = data[data['Split'] != 'test']
-    # data_dev = data[data['Split'] != 'dev']
+    data_test = data[data['Split'] == 'test']
+    data = data[data['Split'] != 'test']
+    data_dev = data[data['Split'] != 'dev']
 
     # Ridit scoring annotations and confidence ratings
     for attr in attributes:
@@ -61,8 +59,7 @@ if __name__ == "__main__":
     concreteness = pd.read_csv(path, sep="\t")
     list_of_lemmas = concreteness['Word'].values.tolist()
 
-    # with open('concrete.pkl', 'wb') as f:
-    #     pickle.dump(concreteness, f)
+
     abs_conc = data.groupby('Lemma')['Is.Abstract.norm'].median().to_frame().reset_index()
     abs_conc['Concreteness'] = abs_conc['Lemma'].map(lambda x: concreteness[concreteness['Word'] == x.lower()]['Conc.M'].values[0] if x.lower() in list_of_lemmas else -1)
     ini = len(abs_conc)
