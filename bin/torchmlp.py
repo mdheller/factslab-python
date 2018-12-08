@@ -1,5 +1,4 @@
 import torch
-from torch.autograd import Variable
 from torch.nn import Module, Linear, ModuleList, BCELoss, Dropout
 import numpy as np
 import pickle
@@ -7,9 +6,7 @@ import argparse
 import random
 from os.path import expanduser
 import sys
-from tqdm import tqdm
 from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1
-from scipy.stats import mode
 from itertools import product
 
 torch.backends.cudnn.benchmark = False
@@ -35,7 +32,7 @@ class simpleMLP(Module):
         self.activation = activation
 
     def nonlinearity(self, x):
-        if self.activation =='relu':
+        if self.activation == 'relu':
             return torch.nn.functional.relu(x)
         elif self.activation == 'tanh':
             return torch.tanh(x)
@@ -49,7 +46,7 @@ class simpleMLP(Module):
         return torch.sigmoid(x)
 
 
-def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, search_on):
+def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, search_on, test_on):
 
     if args.prot == "arg":
         attributes = ["part", "kind", "abs"]
@@ -65,7 +62,7 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
     token_abl_names = {0: 'None', 1: ['UPOS='], 2: ['XPOS='], 3: ['UPOS=', 'XPOS=', 'DEPRE'], 4: ['DEPRE'], 5: ['UPOS=', 'XPOS=']}
 
     with open('data/' + prot + 'hand.pkl', 'rb') as fin:
-        x_pd, y, dev_x_pd, dev_y, data, data_dev_mean, feature_names, cols_to_drop = pickle.load(fin)
+        x_pd, y, dev_x_pd, dev_y, test_x_pd, test_y, data, data_dev_mean, data_test_mean, feature_names = pickle.load(fin)
     verbnet_classids, supersenses, frame_names, lcs_feats, conc_cols, lexical_feats, all_ud_feature_cols = feature_names
     type_cols = verbnet_classids + supersenses + frame_names + lcs_feats + conc_cols
     token_cols = lexical_feats + all_ud_feature_cols
@@ -74,44 +71,51 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
     if type_on or token_on:
         if type_on and not token_on and not abl and not tokenabl:
             ablation = token_cols
-            x_hand = x_pd.drop(x_pd.columns.intersection(token_cols), axis=1).values
-            dev_x_hand = dev_x_pd.drop(dev_x_pd.columns.intersection(token_cols), axis=1).values
         elif token_on and not type_on and not abl:
             if not tokenabl:
                 ablation = type_cols
-                x_hand = x_pd.drop(x_pd.columns.intersection(type_cols), axis=1).values
-                dev_x_hand = dev_x_pd.drop(dev_x_pd.columns.intersection(type_cols), axis=1).values
             else:
-                ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] in token_abl_names[tokenabl]]
+                if tokenabl != 3:
+                    ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] in token_abl_names[tokenabl]]
+                else:
+                    ud_feats_to_remove = [a for a in all_ud_feature_cols if a[0:5] not in token_abl_names[tokenabl]]
                 ablation = type_cols + lexical_feats + ud_feats_to_remove
-                x_hand = x_pd.drop(x_pd.columns.intersection(ablation), axis=1).values
-                dev_x_hand = dev_x_pd.drop(dev_x_pd.columns.intersection(ablation), axis=1).values
         else:
             ablation = abl_dict[abl]
+        cols_to_drop = x_pd.columns[(x_pd == 0).all()].values.tolist()
+        ablation = ablation + cols_to_drop
         x_hand = x_pd.drop(x_pd.columns.intersection(ablation), axis=1).values
         dev_x_hand = dev_x_pd.drop(dev_x_pd.columns.intersection(ablation), axis=1).values
+        test_x_hand = test_x_pd.drop(test_x_pd.columns.intersection(ablation), axis=1).values
+
     else:
         x_hand = None
         dev_x_hand = None
+        test_x_hand = None
 
     if elmo_on:
-        with open('data/' + prot + 'train_elmo.pkl', 'rb') as tr_elmo, open('data/' + prot + 'dev_elmo.pkl', 'rb') as dev_elmo:
+        with open('data/' + prot + 'train_elmo.pkl', 'rb') as tr_elmo, open('data/' + prot + 'dev_elmo.pkl', 'rb') as dev_elmo, open('data/' + prot + 'test_elmo.pkl', 'rb') as test_elmo:
             x_elmo = pickle.load(tr_elmo)
             dev_x_elmo = pickle.load(dev_elmo)
+            test_x_elmo = pickle.load(test_elmo)
     else:
         x_elmo = None
         dev_x_elmo = None
+        test_x_elmo = None
     if glove_on:
-        with open('data/' + prot + 'train_glove.pkl', 'rb') as tr_glove, open('data/' + prot + 'dev_glove.pkl', 'rb') as dev_glove:
+        with open('data/' + prot + 'train_glove.pkl', 'rb') as tr_glove, open('data/' + prot + 'dev_glove.pkl', 'rb') as dev_glove, open('data/' + prot + 'test_glove.pkl', 'rb') as test_glove:
             x_glove = pickle.load(tr_glove)
             dev_x_glove = pickle.load(dev_glove)
+            test_x_glove = pickle.load(test_glove)
     else:
         x_glove = None
         dev_x_glove = None
+        test_x_glove = None
 
     try:
         x = np.concatenate([a for a in (x_hand, x_elmo, x_glove) if a is not None], axis=1)
         dev_x = np.concatenate([a for a in (dev_x_hand, dev_x_elmo, dev_x_glove) if a is not None], axis=1)
+        test_x = np.concatenate([a for a in (test_x_hand, test_x_elmo, test_x_glove) if a is not None], axis=1)
     except ValueError:
         sys.exit('You need an input representation')
 
@@ -123,13 +127,16 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
     y = [[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))]
     y = [np.array(y[i:i + batch_size]) for i in range(0, len(y), batch_size)]
     dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
+    test_y = np.array([[test_y[attributes[0]][i], test_y[attributes[1]][i], test_y[attributes[2]][i]] for i in range(len(test_y[attributes[0]]))])
 
     x = [np.array(x[i:i + batch_size]) for i in range(0, len(x), batch_size)]
     dev_x = [np.array(dev_x[i:i + batch_size]) for i in range(0, len(dev_x), batch_size)]
+    test_x = [np.array(test_x[i:i + batch_size]) for i in range(0, len(test_x), batch_size)]
 
     loss_wts = data.loc[:, [(attr_conf[attr] + ".norm") for attr in attributes]].values
     loss_wts = [np.array(loss_wts[i:i + batch_size]) for i in range(0, len(loss_wts), batch_size)]
     dev_loss_wts = data_dev_mean.loc[:, [(attr_conf[attr] + ".norm") for attr in attributes]].values
+    test_loss_wts = data_test_mean.loc[:, [(attr_conf[attr] + ".norm") for attr in attributes]].values
 
     if search_on:
         search_accs = []
@@ -143,15 +150,18 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
             parameters = [p for p in clf.parameters() if p.requires_grad]
             optimizer = torch.optim.Adam(parameters, weight_decay=alpha)
             early_stopping = [0]
-            for epoch in range(10):
-                for x_, dev_x_, y_ in zip(x, dev_x, y):
+            for epoch in range(20):
+                for x_, dev_x_, y_, wts in zip(x, dev_x, y, loss_wts):
                     optimizer.zero_grad()
+
                     x_ = torch.tensor(x_, dtype=torch.float, device=device)
                     dev_x_ = torch.tensor(dev_x_, dtype=torch.float, device=device)
                     y_ = torch.tensor(y_, dtype=torch.float, device=device)
+                    wts = torch.tensor(wts, dtype=torch.float, device=device)
+
                     y_pred = clf(x_)
                     loss = loss_function(y_pred, y_)
-                    loss = torch.sum(loss * wts)
+                    loss = torch.sum(loss * wts) / batch_size
                     loss.backward()
                     optimizer.step()
                     # loss_trace.append(float(loss.data))
@@ -176,49 +186,11 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
                              str(drp) + "_" + str(act))
                     Path = expanduser('~') + "/Desktop/saved_models/" + name_of_model
                     torch.save(clf.state_dict(), Path)
-        print(max(search_accs, key=lambda x: x[-1]))
+        print(max(search_accs, key=lambda x: x[-1]), "\n")
     else:
-        # clf = simpleMLP(device=device, input_size=x[0].shape[1],
-        #                 layers=best_params['hidden_layer_sizes'],
-        #                 output_size=y[0].shape[1])
-        # clf.to(device)
-        # loss_function = BCELoss()
-        # parameters = [p for p in clf.parameters() if p.requires_grad]
-        # optimizer = torch.optim.Adam(parameters, weight_decay=best_params['alpha'])
-        # early_stopping = [0]
-        # for epoch in range(10):
-        #     clf = clf.train()
-        #     for x_, dev_x_, y_ in tqdm(zip(x, dev_x, y)):
-        #         optimizer.zero_grad()
-        #         x_ = torch.tensor(x_, dtype=torch.float, device=device)
-        #         dev_x_ = torch.tensor(dev_x_, dtype=torch.float, device=device)
-        #         y_ = torch.tensor(y_, dtype=torch.float, device=device)
-        #         y_pred = clf(x_)
-        #         loss = loss_function(y_pred, y_)
-        #         # loss = torch.sum(loss * wts)
-        #         loss.backward()
-        #         optimizer.step()
-        #         # loss_trace.append(float(loss.data))
-        #     clf = clf.eval()
-        #     y_pred_dev = predict(clf, dev_x, device)
-        #     acc = accuracy(dev_y, y_pred_dev)
-        #     early_stopping.append(acc)
-        #     if early_stopping[-1] - early_stopping[-2] < 0:
-        #         break
-        #     else:
-        #         name_of_model = (prot +
-        #                          "elmo:" + str(elmo_on) +
-        #                          "glove:" + str(glove_on) +
-        #                          "token:" + str(token_on) +
-        #                          "type:" + str(type_on) +
-        #                          "tokenabl:" + str(token_abl_names[tokenabl]) +
-        #                          "abl:" + str(abl_dict[abl]) +
-        #                          str(best_params['hidden_layer_sizes']) +
-        #                          str(epoch))
-        #         Path = expanduser('~') + "/Desktop/saved_models/" + name_of_model
-        #         torch.save(clf.state_dict(), Path)
-        hidden_state, alpha, drp, act = ((256, 64), 0.0001, 0.4, 'relu')
-        clf = simpleMLP(device=device, layers=hidden_state, p_dropout=drp,
+        hidden_state, alpha, drp, act = ((256, 64), 0.001, 0.4, 'relu')
+        clf = simpleMLP(device=device, input_size=dev_x[0].shape[1],
+                        layers=hidden_state, p_dropout=drp,
                         activation=act)
         clf.to(device)
         name_of_model = (prot + "_" + "elmo:" + str(elmo_on) + "_" +
@@ -233,8 +205,14 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
         best_model = expanduser('~') + "/Desktop/saved_models/" + name_of_model
         clf.load_state_dict(torch.load(best_model))
         clf.eval()
-        y_pred_dev = predict(clf, dev_x, device)
-        print_metrics(attributes, attr_map, attr_conf, dev_loss_wts, dev_y, y_pred_dev)
+        if not test_on:
+            y_pred_dev = predict(clf, dev_x, device)
+            print_metrics(attributes, attr_map, attr_conf, dev_loss_wts, dev_y, y_pred_dev)
+        else:
+            y_pred_test = predict(clf, test_x, device)
+            print_metrics(attributes=attributes, attr_map=attr_map,
+                          attr_conf=attr_conf, wts=test_loss_wts,
+                          y_true=test_y, y_pred=y_pred_test)
 
 
 def predict(clf, x, device):
@@ -264,7 +242,7 @@ def print_metrics(attributes, attr_map, attr_conf, wts, y_true, y_pred):
 
 
 if __name__ == '__main__':
-     # initialize argument parser
+    # initialize argument parser
     description = 'Run an RNN regression on Genericity protocol annotation.'
     parser = argparse.ArgumentParser(description=description)
 
@@ -295,6 +273,9 @@ if __name__ == '__main__':
     parser.add_argument('--search',
                         action='store_true',
                         help='Run grid search')
+    parser.add_argument('--test',
+                        action='store_true',
+                        help='Run test')
 
     sigdig = 3
     args = parser.parse_args()
@@ -302,4 +283,5 @@ if __name__ == '__main__':
 
     main(prot=args.prot, batch_size=args.batch_size, glove_on=args.glove,
          elmo_on=args.elmo, token_on=args.token, type_on=args.type,
-         tokenabl=args.tokenabl, abl=args.abl, search_on=args.search)
+         tokenabl=args.tokenabl, abl=args.abl, search_on=args.search,
+         test_on=args.test)
