@@ -8,6 +8,8 @@ from os.path import expanduser
 import sys
 from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1
 from itertools import product
+from ast import literal_eval
+from scipy.stats import mode
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
@@ -37,16 +39,35 @@ class simpleMLP(Module):
         elif self.activation == 'tanh':
             return torch.tanh(x)
 
-    def forward(self, x):
+    def forward(self, x, return_hidden=False):
+        '''
+            Runs forward pass on neural network
+
+            Parameters:
+            ----------
+            x: input to neural network
+            return_hidden: if true return a list of hidden state activations
+
+            Returns:
+            ------
+            torch.sigmoid(x): Squashed final layer activation
+            hidden: Hidden layer activations(if return_hidden is True)
+        '''
+        hidden = []
         for i, linmap in enumerate(self.linmaps):
             if i:
                 x = self.nonlinearity(x)
                 x = self.dropout(x)
             x = linmap(x)
-        return torch.sigmoid(x)
+            hidden.append(x.detach().cpu().numpy())
+        if return_hidden:
+            return torch.sigmoid(x), hidden
+        else:
+            return torch.sigmoid(x)
 
 
-def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, search_on, test_on):
+def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on,
+         search_on, test_on, best_params, detailed, weighted):
 
     if args.prot == "arg":
         attributes = ["part", "kind", "abs"]
@@ -61,12 +82,15 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
 
     token_abl_names = {0: 'None', 1: ['UPOS='], 2: ['XPOS='], 3: ['UPOS=', 'XPOS=', 'DEPRE'], 4: ['DEPRE'], 5: ['UPOS=', 'XPOS=']}
 
-    with open('data/' + prot + 'hand.pkl', 'rb') as fin:
+    home = expanduser('~')
+
+    with open(home + 'Downloads/pickled_data/' + prot + 'hand.pkl', 'rb') as fin:
         x_pd, y, dev_x_pd, dev_y, test_x_pd, test_y, data, data_dev_mean, data_test_mean, feature_names = pickle.load(fin)
     verbnet_classids, supersenses, frame_names, lcs_feats, conc_cols, lexical_feats, all_ud_feature_cols = feature_names
     type_cols = verbnet_classids + supersenses + frame_names + lcs_feats + conc_cols
     token_cols = lexical_feats + all_ud_feature_cols
     abl_dict = {0: [], 1: verbnet_classids, 2: supersenses, 3: frame_names, 4: lcs_feats, 5: conc_cols, 6: lexical_feats, 7: all_ud_feature_cols}
+    abl_names = {0: [], 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7}
 
     if type_on or token_on:
         if type_on and not token_on and not abl and not tokenabl:
@@ -94,7 +118,7 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
         test_x_hand = None
 
     if elmo_on:
-        with open('data/' + prot + 'train_elmo.pkl', 'rb') as tr_elmo, open('data/' + prot + 'dev_elmo.pkl', 'rb') as dev_elmo, open('data/' + prot + 'test_elmo.pkl', 'rb') as test_elmo:
+        with open(home + 'Downloads/pickled_data/' + prot + 'train_elmo.pkl', 'rb') as tr_elmo, open(home + 'Downloads/pickled_data/' + prot + 'dev_elmo.pkl', 'rb') as dev_elmo, open(home + 'Downloads/pickled_data/' + prot + 'test_elmo.pkl', 'rb') as test_elmo:
             x_elmo = pickle.load(tr_elmo)
             dev_x_elmo = pickle.load(dev_elmo)
             test_x_elmo = pickle.load(test_elmo)
@@ -103,7 +127,7 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
         dev_x_elmo = None
         test_x_elmo = None
     if glove_on:
-        with open('data/' + prot + 'train_glove.pkl', 'rb') as tr_glove, open('data/' + prot + 'dev_glove.pkl', 'rb') as dev_glove, open('data/' + prot + 'test_glove.pkl', 'rb') as test_glove:
+        with open(home + 'Downloads/pickled_data/' + prot + 'train_glove.pkl', 'rb') as tr_glove, open(home + 'Downloads/pickled_data/' + prot + 'dev_glove.pkl', 'rb') as dev_glove, open(home + 'Downloads/pickled_data/' + prot + 'test_glove.pkl', 'rb') as test_glove:
             x_glove = pickle.load(tr_glove)
             dev_x_glove = pickle.load(dev_glove)
             test_x_glove = pickle.load(test_glove)
@@ -166,7 +190,7 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
                     optimizer.step()
                     # loss_trace.append(float(loss.data))
                 clf = clf.eval()
-                y_pred_dev = predict(clf, dev_x, device)
+                y_pred_dev, _ = predict(clf, dev_x, device)
                 clf = clf.train()
                 acc = accuracy(dev_y, y_pred_dev)
                 early_stopping.append(acc)
@@ -180,15 +204,16 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
                              "token:" + str(token_on) + "_" +
                              "type:" + str(type_on) + "_" +
                              "tokenabl:" + str(token_abl_names[tokenabl]) +
-                             "_" + "abl:" + str(abl_dict[abl]) + "_" +
+                             "_" + "abl:" + str(abl_names[abl]) + "_" +
                              str(hidden_state) + "_" +
                              str(alpha) + "_" +
                              str(drp) + "_" + str(act))
-                    Path = expanduser('~') + "/Desktop/saved_models/" + name_of_model
+                    Path = home + "/Desktop/saved_models/" + name_of_model
                     torch.save(clf.state_dict(), Path)
         print(max(search_accs, key=lambda x: x[-1]), "\n")
     else:
-        hidden_state, alpha, drp, act = ((256, 64), 0.001, 0.4, 'relu')
+        best_params = literal_eval(best_params)
+        hidden_state, alpha, drp, act, _ = best_params
         clf = simpleMLP(device=device, input_size=dev_x[0].shape[1],
                         layers=hidden_state, p_dropout=drp,
                         activation=act)
@@ -198,47 +223,86 @@ def main(prot, batch_size, elmo_on, glove_on, abl, tokenabl, type_on, token_on, 
                         "token:" + str(token_on) + "_" +
                         "type:" + str(type_on) + "_" +
                         "tokenabl:" + str(token_abl_names[tokenabl]) + "_" +
-                         "abl:" + str(abl_dict[abl]) + "_" +
-                         str(hidden_state) + "_" +
-                         str(alpha) + "_" +
-                         str(drp) + "_" + str(act))
-        best_model = expanduser('~') + "/Desktop/saved_models/" + name_of_model
+                        "abl:" + str(abl_names[abl]) + "_" +
+                        str(hidden_state) + "_" +
+                        str(alpha) + "_" +
+                        str(drp) + "_" + str(act))
+        onoff_map = {True: '+', False: '-'}
+        abl_state = "& " + " & ".join([onoff_map[xy] for xy in [type_on, token_on, glove_on, elmo_on]])
+        best_model = home + "/Desktop/saved_models/" + name_of_model
         clf.load_state_dict(torch.load(best_model))
         clf.eval()
         if not test_on:
-            y_pred_dev = predict(clf, dev_x, device)
-            print_metrics(attributes, attr_map, attr_conf, dev_loss_wts, dev_y, y_pred_dev)
+            y_pred_dev, h = predict(clf, dev_x, device)
+            print_metrics(attributes=attributes, attr_map=attr_map,
+                          attr_conf=attr_conf, wts=dev_loss_wts,
+                          y_true=dev_y, y_pred=y_pred_dev, fstr=abl_state,
+                          detailed=detailed, weighted=weighted)
+            do_riemann(h, dev_y)
         else:
-            y_pred_test = predict(clf, test_x, device)
+            y_pred_test, _ = predict(clf, test_x, device)
             print_metrics(attributes=attributes, attr_map=attr_map,
                           attr_conf=attr_conf, wts=test_loss_wts,
-                          y_true=test_y, y_pred=y_pred_test)
+                          y_true=test_y, y_pred=y_pred_test, fstr=abl_state,
+                          detailed=detailed, weighted=weighted)
 
 
 def predict(clf, x, device):
     predictions = np.empty((0, 3), int)
+    final_h_size = clf.linmaps[-2].weight.shape[0]
+    h = np.empty((0, final_h_size), float)
     for mb in x:
         mb = torch.tensor(mb, dtype=torch.float, device=device)
-        preds = clf(mb)
+        preds, h_ = clf(mb, return_hidden=True)
         preds = preds > 0.5
         predictions = np.concatenate([predictions, preds.detach().cpu().numpy()])
-    return predictions
+        h = np.concatenate([h, h_[-2]])
+    return predictions, h
+
+
+def do_riemann(h, y):
+    import umap
+    import matplotlib
+    matplotlib.use('agg')
+    import matplotlib.pyplot as plt
+    reducer = umap.UMAP(random_state=1)
+    reducer.fit(h)
+    embedding = reducer.transform(h)
+    # target_dict = {'[0 0 0]': 0, '[1 0 0]': 1, '[0 1 0]': 2, '[0 0 1]': 3, '[1 1 0]': 4, '[0 1 1]': 5, '[1 0 1]': 6, '[1 1 1]': 7}
+    # targets = np.array([i for i in range(0, 8)])
+    plt.scatter(embedding[:, 0], embedding[:, 1], c=y, cmap='Spectral')
+    # plt.gca().set_aspect('equal', 'datalim')
+    # plt.legend()
+    # plt.colorbar(boundaries=np.arange(8) - 0.5).set_ticks(np.arange(8))
+    plt.savefig('umap.png')
 
 
 def train():
     pass
 
 
-def print_metrics(attributes, attr_map, attr_conf, wts, y_true, y_pred):
-    print("Micro F1:", np.round(f1(y_true, y_pred, average='micro'), sigdig), "\nMacro F1:", np.round(f1(y_true, y_pred, average='macro'), sigdig),
-        "\nTotal accuracy:", np.round(accuracy(y_true, y_pred), sigdig))
-    for ind, attr in enumerate(attributes):
-        print(attr_map[attr])
-        # mode_ = mode(y_true[:, ind])[0][0]
-        print("Accuracy :\t", np.round(accuracy(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(accuracy(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig), "\n",
-        "Precision :\t", np.round(precision(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(precision(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig), "\n",
-        "Recall :\t", np.round(recall(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(recall(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig), "\n",
-        "F1 score: \t", np.round(f1(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(f1(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig), "\n")
+def print_metrics(attributes, attr_map, attr_conf, wts, y_true, y_pred, fstr,
+                  detailed=False, weighted=False):
+    if detailed:
+        mode_ = np.array([[mode(y_true[:, 0])[0][0], mode(y_true[:, 1])[0][0], mode(y_true[:, 2])[0][0]] for i in range(len(y_true))])
+        print("Mode answers:", mode_)
+        print("Subset accuracy with mode:", accuracy(y_true, y_pred))
+
+        for ind, attr in enumerate(attributes):
+            print(attr_map[attr])
+            print("Accuracy :\t", np.round(accuracy(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(accuracy(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig),
+            "\nPrecision :\t", np.round(precision(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(precision(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig),
+            "\nRecall :\t", np.round(recall(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(recall(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig),
+            "\nF1 score: \t", np.round(f1(y_true[:, ind], y_pred[:, ind]), sigdig), np.round(f1(y_true[:, ind], y_pred[:, ind], sample_weight=wts[:, ind]), sigdig),
+            "\nMicro F1:", np.round(f1(y_true, y_pred, average='micro'), sigdig), np.round(f1(y_true, y_pred, average='micro', sample_weight=np.sum(wts, axis=1) / 3), sigdig),
+            "\nMacro F1:", np.round(f1(y_true, y_pred, average='macro'), sigdig), np.round(f1(y_true, y_pred, average='macro', sample_weight=np.sum(wts, axis=1) / 3), sigdig),
+            "\nTotal accuracy:", np.round(accuracy(y_true, y_pred), sigdig), np.round(accuracy(y_true, y_pred, sample_weight=np.sum(wts, axis=1) / 3), sigdig))
+    else:
+        sigdig2 = 1
+        if not weighted:
+            print(fstr, '&', np.round(precision(y_true[:, 0], y_pred[:, 0]) * 100, sigdig2), '&', np.round(recall(y_true[:, 0], y_pred[:, 0]) * 100, sigdig2), '&', np.round(f1(y_true[:, 0], y_pred[:, 0]) * 100, sigdig2), '&', np.round(precision(y_true[:, 1], y_pred[:, 1]) * 100, sigdig2), '&', np.round(recall(y_true[:, 1], y_pred[:, 1]) * 100, sigdig2), '&', np.round(f1(y_true[:, 1], y_pred[:, 1]) * 100, sigdig2), '&', np.round(precision(y_true[:, 2], y_pred[:, 2]) * 100, sigdig2), '&', np.round(recall(y_true[:, 2], y_pred[:, 2]) * 100, sigdig2), '&', np.round(f1(y_true[:, 2], y_pred[:, 2]) * 100, sigdig2), '&', np.round(f1(y_true, y_pred, average='micro') * 100, sigdig2), '&', np.round(f1(y_true, y_pred, average='macro') * 100, sigdig2), '&', np.round(accuracy(y_true, y_pred) * 100, sigdig2), "\\\\")
+        else:
+            print(fstr, '&', np.round(precision(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig2), '&', np.round(recall(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig2), '&', np.round(f1(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig2), '&', np.round(precision(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig2), '&', np.round(recall(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig2), '&', np.round(f1(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig2), '&', np.round(precision(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig2), '&', np.round(recall(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig2), '&', np.round(f1(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig2), '&', np.round(f1(y_true, y_pred, average='micro', sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig2), '&', np.round(f1(y_true, y_pred, average='macro', sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig2), '&', np.round(accuracy(y_true, y_pred, sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig2), "\\\\")
 
 
 if __name__ == '__main__':
@@ -273,15 +337,24 @@ if __name__ == '__main__':
     parser.add_argument('--search',
                         action='store_true',
                         help='Run grid search')
+    parser.add_argument('--best',
+                        type=str,
+                        default=None)
     parser.add_argument('--test',
+                        action='store_true',
+                        help='Run test')
+    parser.add_argument('--detailed',
+                        action='store_true',
+                        help='Run test')
+    parser.add_argument('--weighted',
                         action='store_true',
                         help='Run test')
 
     sigdig = 3
     args = parser.parse_args()
-    home = expanduser('~')
 
     main(prot=args.prot, batch_size=args.batch_size, glove_on=args.glove,
          elmo_on=args.elmo, token_on=args.token, type_on=args.type,
          tokenabl=args.tokenabl, abl=args.abl, search_on=args.search,
-         test_on=args.test)
+         test_on=args.test, best_params=args.best, detailed=args.detailed,
+         weighted=args.weighted)

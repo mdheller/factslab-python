@@ -188,6 +188,7 @@ if __name__ == "__main__":
                  "hyp": "Hyp.Confidence"}
 
     if args.load_data:
+        sys.exit('no')
         data = pd.read_csv(datafile, sep="\t")
         data = data.dropna()
         data['Unique.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x["Span"]), axis=1)

@@ -9,3 +9,7 @@ dist/
 *.lcs
 *.pkl
 results/
+*.sh
+*.png
+*.jpg
+*.jpeg
