@@ -36,13 +36,13 @@ if __name__ == "__main__":
                         default=0.001)
     parser.add_argument('--wd',
                         type=float,
-                        default=0)
+                        default=0.0001)
     parser.add_argument('--batchsize',
                         type=int,
-                        default=64)
+                        default=128)
     parser.add_argument('--layers',
                         type=str,
-                        default='512,64')
+                        default='256,32')
     parser.add_argument('--argrep',
                         type=str,
                         default="root",
@@ -59,6 +59,12 @@ if __name__ == "__main__":
                         type=str,
                         default="none",
                         help='Argument context - none, david, param')
+    parser.add_argument('--hand',
+                        action='store_true',
+                        help='Turn on hand engineering feats')
+    parser.add_argument('--embed',
+                        action='store_true',
+                        help='Turn on elmo/glove embeddings')
 
     # parse arguments
     args = parser.parse_args()
@@ -118,32 +124,35 @@ if __name__ == "__main__":
     dev_in.close()
 
     x, y, roots, spans, context_roots, context_spans, loss_wts, hand_feats = train_data
-
+    hand_feat_dim = len(hand_feats[0][0])
     # ELMO parameters
     if 'elmo' in args.embeddings:
         options_file = args.embeddings + "options/elmo_2x4096_512_2048cnn_2xhighway_options.json"
         weight_file = args.embeddings + "weights/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
         embed_params = (options_file, weight_file)
         embed_dim = 1024
+    # GlOvE parmaters
     elif 'glove' in args.embeddings:
-        dev_x_arg = dev_data['arg'][0]
-        dev_x_pred = dev_data['pred'][0]
-        vocab = list(set([word for minib in (x + dev_x_arg + dev_x_pred) for sent in minib for word in sent]))
+        dev_x = dev_data[0]
+        vocab = list(set([word for minib in (x + dev_x) for sent in minib for word in sent]))
         x = padding(x)
-        dev_data['arg'][0] = padding(dev_data['arg'][0])
-        dev_data['pred'][0] = padding(dev_data['pred'][0])
-
+        dev_data[0] = padding(dev_data[0])
         embed_params = (load_glove_embedding(args.embeddings, vocab), vocab + ["<PAD>"])
         embed_dim = 300
 
     # pyTorch figures out device to do computation on
     device_to_use = device("cuda:0" if is_available() else "cpu")
 
+    # Do ablations here before initialising
+
     # Initialise the model
     trainer = MLPTrainer(embed_params=embed_params,
-                         all_attributes=all_attributes, layers=args.layers,
+                         all_attributes={args.protocol: all_attributes[args.protocol]}, layers=args.layers,
                          device=device_to_use, attention_type=model_type,
-                         lr=args.lr, weight_decay=args.wd, embedding_dim=embed_dim)
+                         lr=args.lr, weight_decay=args.wd,
+                         embedding_dim=embed_dim, hand_feat_dim=hand_feat_dim,
+                         turn_on_hand_feats=args.hand,
+                         turn_on_embeddings=args.embed)
 
     # Training phase
     trainer.fit(X=x, Y=y, loss_wts=loss_wts, roots=roots, spans=spans,

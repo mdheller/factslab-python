@@ -6,14 +6,15 @@ from zipfile import ZipFile
 from torch import from_numpy, sort
 from sklearn.utils import shuffle
 from itertools import zip_longest
-from nltk.stem import WordNetLemmatizer
 from nltk.corpus import wordnet, framenet, verbnet
 from predpatt import load_conllu, PredPatt, PredPattOpts
 import pickle
 from collections import Counter
+from allennlp.commands.elmo import ElmoEmbedder
+import torch
 
 
-def load_glove_embedding(fpath, vocab):
+def load_glove_embedding(fpath, vocab, prot=''):
     """load glove embedding
 
     Parameters
@@ -26,7 +27,7 @@ def load_glove_embedding(fpath, vocab):
 
     zipname = os.path.split(fpath)[-1]
     size, dim = zipname.split('.')[1:3]
-    fpathout = 'glove.' + size + '.' + dim + '.filtered.txt'
+    fpathout = prot + 'glove.' + size + '.' + dim + '.filtered.txt'
     if fpathout in os.listdir(os.getcwd()):
         embedding = pd.read_csv(fpathout, index_col=0, header=None, sep=' ')
 
@@ -41,15 +42,14 @@ def load_glove_embedding(fpath, vocab):
         embedding = pd.DataFrame(emb[:, 1:].astype(float), index=emb[:, 0])
 
         mean_emb = list(embedding.mean(axis=0).values)
-        oov = [w for w in vocab if w not in embedding.index.values]
+        oov = [w for w in vocab if w not in embedding.index.values] + ["_UNK"]
 
         # Add an embedding element for padding
         PADDING_ELEMENT = ["<PAD>"]
         oov = pd.DataFrame(np.tile(mean_emb, [len(oov), 1]), index=oov)
         pad = pd.DataFrame([np.zeros(len(mean_emb))], index=PADDING_ELEMENT)
-        oov = pd.concat([oov, pad], axis=0)
 
-        embedding = pd.concat([embedding, oov], axis=0)
+        embedding = pd.concat([embedding, oov, pad], axis=0)
         embedding.to_csv(fpathout, sep=' ', header=False)
 
     return embedding
@@ -234,9 +234,12 @@ def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
     # Form tuples from the contexts
     spans = [[datum[:] for datum in data['Span'].values.tolist()][i:i + batch_size] for i in range(0, len(data["Span"]), batch_size)]
 
-    y = [{attr: (data[attr_map[attr] + ".norm"].values[i:i + batch_size]) for attr in attributes} for i in range(0, len(data[attr_map[attr] + ".norm"].values), batch_size)]
-
-    loss_wts = [{attr: data[attr_conf[attr] + ".norm"].values[i:i + batch_size] for attr in attributes} for i in range(0, len(data[attr_conf[attr] + ".norm"].values), batch_size)]
+    # y = [{attr: (data[attr_map[attr] + ".norm"].values[i:i + batch_size]) for attr in attributes} for i in range(0, len(data[attr_map[attr] + ".norm"].values), batch_size)]
+    raw_y = data.loc[:, [(attr_map[attr] + ".norm") for attr in attributes]].values.tolist()
+    y = [raw_y[i: i + batch_size] for i in range(0, len(raw_y), batch_size)]
+    # loss_wts = [[data[attr_conf[attr] + ".norm"].values[i:i + batch_size] for attr in attributes] for i in range(0, len(data[attr_conf[attr] + ".norm"].values), batch_size)]
+    raw_wts = data.loc[:, [(attr_conf[attr] + ".norm") for attr in attributes]].values.tolist()
+    loss_wts = [raw_wts[i: i + batch_size] for i in range(0, len(raw_wts), batch_size)]
 
     # Create dev data
     if regressiontype == "linear":
@@ -302,19 +305,20 @@ def lcs_score(lcs, lemma):
     return score
 
 
-def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
+def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, l2f):
     '''
         Extract hand engineered features from a word
     '''
-    lmt = WordNetLemmatizer()
     sent = sent_feat[0]
-    feats = sent_feat[1]
+    feats = sent_feat[1][0]
+    all_lemmas = sent_feat[1][1]
     deps = [x[2] for x in sent.tokens[token].dependents]
     deps_text = [x[2].text for x in sent.tokens[token].dependents]
     deps_feats = '|'.join([(a + "_dep") for x in deps for a in feats[x.position].split('|')])
 
     all_feats = (feats[token] + '|' + deps_feats).split('|')
     all_feats = list(filter(None, all_feats))
+
     # UD Lexical features
     for f in all_feats:
         dict_feats[f] += 1
@@ -326,43 +330,60 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs):
 
     # wordnet supersense of lemma
     for synset in wordnet.synsets(lemma):
-        dict_feats[synset.lexname()] = 1
+        dict_feats['supersense=' + synset.lexname()] = 1
 
-    # # framenet name
-    # for f_name in [x.name for x in framenet.frames_by_lemma(lemma)]:
-    #     dict_feats[f_name] = 1
+    # framenet name
+    pos = sent.tokens[token].tag
+    if lemma + '.' + pos in l2f.keys():
+        frame = l2f[lemma + '.' + pos]
+        dict_feats['frame=' + frame] = 1
 
     # Predicate features
     if prot == "pred":
         # verbnet class
         f_lemma = verbnet.classids(lemma=lemma)
         for f in f_lemma:
-            dict_feats[f] = 1
+            dict_feats['classid=' + f] = 1
 
         # lcs eventiveness
-        dict_feats['lcs'] = lcs_score(lcs, lemma)
+        if lemma in lcs.verbs:
+            if True in lcs.eventive(lemma):
+                dict_feats['lcs_eventive'] = 1
+            else:
+                dict_feats['lcs_stative'] = 1
 
-        # sum of concreteness score of dependents
-        dict_feats['concreteness'] = 0
-        for g_lemma in [lmt.lemmatize(x[2].text) for x in sent.tokens[token].dependents]:
-            dict_feats['concreteness'] += concreteness_score(concreteness, g_lemma)
-        if len(sent.tokens[token].dependents):
-            dict_feats['concreteness'] /= len(sent.tokens[token].dependents)
+        dep_c_scores = [concreteness_score(concreteness, g_lemma) for g_lemma in [all_lemmas[x[2].position] for x in sent.tokens[token].dependents]]
+        if len(dep_c_scores):
+            dict_feats['concreteness'] = sum(dep_c_scores) / len(dep_c_scores)
+            dict_feats['max_conc'] = max(dep_c_scores)
+            dict_feats['min_conc'] = min(dep_c_scores)
         else:
             dict_feats['concreteness'] = 2.5
+            dict_feats['max_conc'] = 2.5
+            dict_feats['min_conc'] = 2.5
     # Argument features
     else:
         dict_feats['concreteness'] = concreteness_score(concreteness, lemma)
 
         # lcs eventiveness score and verbnet class of argument head
-        if not sent.tokens[token].gov:
-            dict_feats['lcs'] = -1
-        else:
-            gov_lemma = lmt.lemmatize(sent.tokens[token].gov.text, 'v')
-            dict_feats['lcs'] = lcs_score(lcs, gov_lemma)
+        if sent.tokens[token].gov:
+            gov_lemma = all_lemmas[sent.tokens[token].gov.position]
+
+            # lexical features of dependent of governor
+            deps_gov = [x[2].text for x in sent.tokens[token].gov.dependents]
+            for f in deps_gov:
+                if f in dict_feats.keys():
+                    dict_feats[f] += 1
+
+            # lcs eventiveness
+            if gov_lemma in lcs.verbs:
+                if True in lcs.eventive(gov_lemma):
+                    dict_feats['lcs_eventive'] = 1
+                else:
+                    dict_feats['lcs_stative'] = 1
 
             for f_lemma in verbnet.classids(lemma=gov_lemma):
-                dict_feats[f_lemma] += 1
+                dict_feats['classid=' + f_lemma] += 1
 
     return dict_feats
 
@@ -374,12 +395,13 @@ def hand_engineering(prot, batch_size, data, data_dev):
         eventivity scores
     '''
     home = expanduser("~")
+    framnet_posdict = {'V': 'VERB', 'N': 'NOUN', 'A': 'ADJ', 'ADV': 'ADV', 'PREP': 'ADP', 'NUM': 'NUM', 'INTJ': 'INTJ', 'ART': 'DET', 'C': 'CCONJ', 'SCON': 'SCONJ', 'PRON': 'PRON', 'IDIO': 'X', 'AVP': 'ADV'}
     # Load the features
     features = {}
-    with open(home + '/Desktop/protocols/data/features.tsv', 'r') as f:
+    with open(home + '/Desktop/protocols/data/features-2.tsv', 'r') as f:
         for line in f.readlines():
             feats = line.split('\t')
-            features[feats[0]] = feats[1].split()
+            features[feats[0]] = (feats[1].split(), feats[2].split())
 
     # Load the predpatt objects for creating features
     files = ['/Downloads/UD_English-r1.2/en-ud-train.conllu',
@@ -402,34 +424,49 @@ def hand_engineering(prot, batch_size, data, data_dev):
     raw_dev_x = data_dev['Structure'].tolist()
 
     all_x = raw_x + raw_dev_x
-    all_feats = '|'.join(['|'.join(all_x[i][1]) for i in range(len(all_x))])
+    all_feats = '|'.join(['|'.join(all_x[i][1][0]) for i in range(len(all_x))])
     feature_cols = Counter(all_feats.split('|'))
-    dict_feats = {}
 
+    # All UD dataset features
+    all_ud_feature_cols = list(feature_cols.keys()) + [(a + "_dep") for a in feature_cols.keys()]
+
+    # Concreteness
     f = open(home + '/Desktop/protocols/data/concrete.pkl', 'rb')
     concreteness = pickle.load(f)
+    if prot == 'arg':
+        conc_cols = ['concreteness']
+    else:
+        conc_cols = ['concreteness', 'max_conc', 'min_conc']
     f.close()
 
-    from factslab.utility.lcsreader import LexicalConceptualStructureLexicon
+    # LCS eventivity
+    from lcsreader import LexicalConceptualStructureLexicon
     lcs = LexicalConceptualStructureLexicon(home + '/Desktop/protocols/data/verbs-English.lcs')
+    lcs_feats = ['lcs_eventive', 'lcs_stative']
 
     # Wordnet supersenses(lexicographer names)
-    supersenses = list(set([x.lexname() for x in wordnet.all_synsets()]))
+    supersenses = list(set(['supersense=' + x.lexname() for x in wordnet.all_synsets()]))
 
-    # # Framenet
-    # frame_names = [x.name for x in framenet.frames()]
+    # Framenet
+    lem2frame = {}
+    for lm in framenet.lus():
+        for lemma in lm['lexemes']:
+            lem2frame[lemma['name'] + '.' + framnet_posdict[lemma['POS']]] = lm['frame']['name']
+    frame_names = ['frame=' + x.name for x in framenet.frames()]
 
+    # Verbnet classids
+    verbnet_classids = ['classid=' + vcid for vcid in verbnet.classids()]
+
+    # Lexical features
     lexical_feats = ['can', 'could', 'should', 'would', 'will', 'may', 'might', 'must', 'ought', 'dare', 'need'] + ['the', 'an', 'a', 'few', 'another', 'some', 'many', 'each', 'every', 'this', 'that', 'any', 'most', 'all', 'both', 'these']
 
-    for f in verbnet.classids() + lexical_feats + supersenses:
+    dict_feats = {}
+    for f in verbnet_classids + lexical_feats + supersenses + frame_names + lcs_feats + all_ud_feature_cols + conc_cols:
         dict_feats[f] = 0
-    for a in feature_cols.keys():
-        dict_feats[a] = 0
-        dict_feats[a + "_dep"] = 0
 
-    x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=prot, concreteness=concreteness, lcs=lcs) for sent, token, lemma in zip(raw_x, data['Root.Token'].tolist(), data['Lemma'].tolist())])
+    x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_x, data['Root.Token'].tolist(), data['Lemma'].tolist())])
 
-    dev_x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=prot, concreteness=concreteness, lcs=lcs) for sent, token, lemma in zip(raw_dev_x, data_dev['Root.Token'].tolist(), data_dev['Lemma'].tolist())])
+    dev_x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_dev_x, data_dev['Root.Token'].tolist(), data_dev['Lemma'].tolist())])
 
     # Figure out which columns to drop(they're always zero)
     todrop1 = dev_x_pd.columns[(dev_x_pd == 0).all()].values.tolist()
@@ -472,3 +509,33 @@ def feature_extract():
                         feats = " ".join(feats)
                         fout.write(sent_id + "\t" + feats + "\n")
                         feats = []
+
+
+def get_elmo(sentences, tokens, batch_size):
+    '''
+        Returns numpy array of reduced elmo representations
+    '''
+    x = []
+    sentences = [sentences[j: j + batch_size] for j in range(0, len(sentences), batch_size)]
+    tokens = [tokens[j: j + batch_size] for j in range(0, len(tokens), batch_size)]
+    options_file = "/srv/models/pytorch/elmo/options/elmo_2x4096_512_2048cnn_2xhighway_5.5B_options.json"
+    weight_file = "/srv/models/pytorch/elmo/weights/elmo_2x4096_512_2048cnn_2xhighway_5.5B_weights.hdf5"
+    # Convert x data to embeddings
+    embeddings = ElmoEmbedder(options_file, weight_file, cuda_device=0)
+    for toks, words in zip(tokens, sentences):
+        toks = torch.tensor(toks, dtype=torch.long, device=torch.device('cuda:0')).unsqueeze(1)
+        raw_embeds, _ = embeddings.batch_to_embeddings(words)
+        raw_embeds = torch.cat((raw_embeds[:, 0, :, :], raw_embeds[:, 1, :, :], raw_embeds[:, 2, :, :]), dim=2)
+        root_embeds = choose_tokens(batch=raw_embeds, lengths=toks)
+        x.append(root_embeds.detach().cpu().numpy())
+    return np.concatenate(x, axis=0)
+
+
+def choose_tokens(batch, lengths):
+    '''
+        Extracts tokens from a batch at specified position(lengths)
+        batch - batch_size x max_sent_length x embed_dim
+        lengths - batch_size x max_span_length x embed_dim
+    '''
+    idx = (lengths).unsqueeze(2).expand(-1, -1, batch.shape[2])
+    return batch.gather(1, idx).squeeze()

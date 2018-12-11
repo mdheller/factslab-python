@@ -1,5 +1,5 @@
 from torch.nn import Module, Linear, ModuleDict, ModuleList
-from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss, Dropout
+from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss, Dropout, BCELoss
 import numpy as np
 from sklearn.metrics import accuracy_score as acc, f1_score as f1, precision_score as prec, recall_score as rec, r2_score as r2, mean_squared_error as mse
 import torch
@@ -8,14 +8,24 @@ from scipy.stats import mode
 from collections import defaultdict
 from functools import partial
 from allennlp.commands.elmo import ElmoEmbedder
+import sys
 # from allennlp.modules.elmo import Elmo, batch_to_ids
 from os.path import expanduser
 from tqdm import tqdm
+import random
 
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+random.seed(1)
+np.random.seed(1)
+torch.manual_seed(1)
+torch.cuda.manual_seed(1)
 
 class MLPRegression(Module):
     def __init__(self, embed_params, attention_type, all_attributes,
-                 output_size, layers, device="cpu", embedding_dim=1024):
+                 output_size, layers, hand_feat_dim, device="cpu",
+                 embedding_dim=1024, turn_on_hand_feats=False,
+                 turn_on_embeddings=False):
         '''
             Super class for training
         '''
@@ -28,9 +38,18 @@ class MLPRegression(Module):
         self.output_size = output_size
         self.attention_type = attention_type
         self.all_attributes = all_attributes
-        self.counter = 0
+        self.is_hand_feats_on = turn_on_hand_feats
+        self.is_embeds_on = turn_on_embeddings
+
         # Initialise embeddings
-        self._init_embeddings(embed_params)
+        if self.is_embeds_on:
+            self._init_embeddings(embed_params)
+        else:
+            self.reduced_embedding_dim = 0
+        if self.is_hand_feats_on:
+            self.hand_feat_dim = hand_feat_dim
+        else:
+            self.hand_feat_dim = 0
 
         # Initialise regression layers and parameters
         self._init_regression()
@@ -48,7 +67,12 @@ class MLPRegression(Module):
             weight_file = embedding_params[1]
             self.embeddings = ElmoEmbedder(options_file, weight_file, cuda_device=0)
             # self.embeddings = Elmo(options_file, weight_file, 3, dropout=0)
-            self.reduced_embedding_dim = int(self.embedding_dim / 4)
+            self.reduced_embedding_dim = 256
+
+            # ELMO tuning parameters
+            self.embed_linmap_argpred_lower = Linear(self.embedding_dim, self.reduced_embedding_dim)
+            self.embed_linmap_argpred_mid = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
+            self.embed_linmap_argpred_top = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
 
         else:
             # GloVe embeddings
@@ -61,28 +85,20 @@ class MLPRegression(Module):
                                                  norm_type=2,
                                                  scale_grad_by_freq=False,
                                                  sparse=False)
-            self.reduced_embedding_dim = int(self.embedding_dim / 2)
+            self.reduced_embedding_dim = 300
 
             self.embeddings.weight.data.copy_(torch.from_numpy(glove_embeds.values))
             self.embeddings.weight.requires_grad = False
             self.vocab_hash = {w: i for i, w in enumerate(self.vocab)}
+            # self.embed_linmap = Linear(self.embedding_dim, self.reduced_embedding_dim)
 
     def _init_regression(self):
         '''
             Define the linear maps
         '''
-        if not self.vocab:
-            # ELMO tuning parameters
-            self.embed_linmap_argpred_lower = Linear(self.embedding_dim, self.reduced_embedding_dim)
-            self.embed_linmap_argpred_mid = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
-            self.embed_linmap_argpred_top = Linear(self.embedding_dim, self.reduced_embedding_dim, bias=False)
-        else:
-            self.embed_linmap = Linear(self.embedding_dim, self.reduced_embedding_dim)
 
         # Output regression parameters
-        self.lin_maps = ModuleDict({'arg': ModuleList([]),
-                                    'pred': ModuleList([])})
-        # self.layer_norm = ModuleDict({})
+        self.linmaps = ModuleDict({prot: ModuleList([]) for prot in self.all_attributes.keys()})
 
         for prot in self.all_attributes.keys():
             last_size = self.reduced_embedding_dim
@@ -96,17 +112,13 @@ class MLPRegression(Module):
                 else:
                     last_size *= 3
             # self.layer_norm[prot] = torch.nn.LayerNorm(last_size)
-            # if hand_engineering:
-            last_size = last_size + 859
+            last_size += self.hand_feat_dim
             for out_size in self.layers:
-                linmap = Linear(last_size, out_size, bias=False)
-                self.lin_maps[prot].append(linmap)
+                linmap = Linear(last_size, out_size)
+                self.linmaps[prot].append(linmap)
                 last_size = out_size
-            final_lin_map = ModuleDict()
-            for attr in self.all_attributes[prot]:
-                linmap = Linear(last_size, self.output_size, bias=False)
-                final_lin_map[attr] = linmap
-            self.lin_maps[prot].append(final_lin_map)
+            final_linmap = Linear(last_size, self.output_size)
+            self.linmaps[prot].append(final_linmap)
 
         # Dropout layer
         self.dropout = Dropout()
@@ -142,8 +154,11 @@ class MLPRegression(Module):
                 repr_dim = self.reduced_embedding_dim
 
             # Context representation
-            # There is no attention for argument david but parameter exists
-            self.att_map_context[prot] = Linear(repr_dim, self.reduced_embedding_dim, bias=False)
+            # There is no attention for argument davidsonian
+            if self.attention_type[prot]['context'] == 'param':
+                self.att_map_context[prot] = Linear(repr_dim, self.reduced_embedding_dim, bias=False)
+            elif self.attention_type[prot]['context'] == 'david' and prot == 'arg':
+                self.att_map_context[prot] = Linear(repr_dim, self.reduced_embedding_dim, bias=False)
 
     def _choose_tokens(self, batch, lengths):
         '''
@@ -155,10 +170,8 @@ class MLPRegression(Module):
         return batch.gather(1, idx).squeeze()
 
     def _get_inputs(self, words):
-        '''Return ELMO embeddings
-            Can be done either as a module, or programmatically
-
-            If done programmatically, the 3 layer representations are concatenated, then mapped to a lower dimension and squashed with tanh
+        '''
+           Return ELMO embeddings as root, span or param span
         '''
         if not self.vocab:
             raw_embeds, masks = self.embeddings.batch_to_embeddings(words)
@@ -177,8 +190,8 @@ class MLPRegression(Module):
             indices = torch.tensor(indices, dtype=torch.long, device=self.device)
             embeddings = self.embeddings(indices)
             masks = (embeddings != 0)[:, :, :self.reduced_embedding_dim].byte()
-            reduced_embeddings = self.embed_linmap(embeddings) * masks.float()
-            return reduced_embeddings, masks
+            # reduced_embeddings = self.embed_linmap(embeddings) * masks.float()
+            return embeddings, masks
 
     def _get_representation(self, prot, embeddings, roots, spans,
                             context=False):
@@ -304,58 +317,38 @@ class MLPRegression(Module):
         '''
             Run regression to get 3 attribute vector
         '''
-        for i, lin_map in enumerate(self.lin_maps[prot]):
+        for i, lin_map in enumerate(self.linmaps[prot]):
             if i:
                 x = self._regression_nonlinearity(x)
                 x = self.dropout(x)
-            if i == (len(self.lin_maps[prot]) - 1):
-                final_h = {}
-                for i, attr in enumerate(self.all_attributes[prot]):
-                    final_h[attr] = torch.sigmoid(lin_map[attr](x))
-            else:
-                x = lin_map(x)
 
-        return final_h
+            x = lin_map(x)
+
+        return torch.sigmoid(x)
 
     def forward(self, prot, words, roots, spans, context_roots,
                 context_spans, hand_feats):
-        """Forward propagation of activations"""
-        inputs_for_attention, masks = self._get_inputs(words)
-        inputs_for_regression = self._run_attention(prot=prot,
-                                    embeddings=inputs_for_attention,
-                                    roots=roots, spans=spans,
-                                    context_roots=context_roots,
-                                    context_spans=context_spans,
-                                    masks=masks)
-        if hand_feats is not None:
-            inputs_for_regression = torch.cat((inputs_for_regression, hand_feats), dim=1)
+        """
+            Forward propagation of activations
+        """
+
+        if self.is_embeds_on:
+            inputs_for_attention, masks = self._get_inputs(words)
+            inputs_for_regression = self._run_attention(prot=prot,
+                                        embeddings=inputs_for_attention,
+                                        roots=roots, spans=spans,
+                                        context_roots=context_roots,
+                                        context_spans=context_spans,
+                                        masks=masks)
+            if self.is_hand_feats_on:
+                inputs_for_regression = torch.cat((inputs_for_regression, hand_feats), dim=1)
+        elif self.is_hand_feats_on:
+            inputs_for_regression = hand_feats
+        else:
+            sys.exit('You need some word representation!!')
+
         outputs = self._run_regression(prot=prot, x=inputs_for_regression)
         return outputs
-
-
-class SimpleMLPClassifier(Module):
-    def __init__(self, layer_size, dropout, input_size, output_size=3):
-        '''
-            Init parameters
-        '''
-        self.lin_maps = ModuleList()
-        last_size = input_size
-        for num_neurons in layer_size:
-            self.lin_maps.append(Linear(last_size, num_neurons))
-        self.lin_maps.append(Linear(last_size, output_size))
-
-    def forward(self, x):
-        '''
-            Run forward pass
-        '''
-
-        for i, linmap in enumerate(self.lin_maps):
-            if i:
-                x = F.relu(x)
-                # x = self.dropout(x)
-            x = linmap(x)
-
-        return x
 
 
 class MLPTrainer:
@@ -363,7 +356,7 @@ class MLPTrainer:
     loss_function_map = {"linear": MSELoss,
                          "robust": L1Loss,
                          "robust_smooth": SmoothL1Loss,
-                         "multinomial": CrossEntropyLoss}
+                         "multinomial": BCELoss}
 
     def __init__(self, attention_type, all_attributes,
                  regressiontype="multinomial",
@@ -396,13 +389,14 @@ class MLPTrainer:
                                              **self._init_kwargs)
             self._loss_function = lf_class()
         else:
-            output_size = 2
+            output_size = 3
             self._regression = MLPRegression(output_size=output_size,
                                             device=self.device,
                                             attention_type=self.att_type,
                                             all_attributes=self.all_attributes,
                                              **self._init_kwargs)
-            self._loss_function = lf_class(reduction="none")
+            # self._loss_function = lf_class(reduction="none")
+            self._loss_function = lf_class()
 
         self._regression = self._regression.to(self.device)
         self._loss_function = self._loss_function.to(self.device)
@@ -432,29 +426,25 @@ class MLPTrainer:
             for x, y, rts, sps, croots, csps, wts, hfts in tqdm(zip(X, Y, roots, spans, context_roots, context_spans, loss_wts, hand_feats), total=len(X)):
 
                 optimizer.zero_grad()
-                losses = {}
 
                 rts = torch.tensor(rts, dtype=torch.long, device=self.device).unsqueeze(1)
                 hfts = torch.tensor(hfts, dtype=torch.float, device=self.device)
                 max_span = max([len(a) for a in sps])
                 sps = torch.tensor([a + [-1 for i in range(max_span - len(a))] for a in sps], dtype=torch.long, device=self.device)
 
-                for attr in self.all_attributes[prot]:
-                    if self._continuous:
-                        y[attr] = torch.tensor(y[attr], dtype=torch.float, device=self.device)
-                    else:
-                        y[attr] = torch.tensor(y[attr], dtype=torch.long, device=self.device)
-                    wts[attr] = torch.tensor(wts[attr], dtype=torch.float, device=self.device)
+                # for attr in self.all_attributes[prot]:
+                if self._continuous:
+                    y = torch.tensor(y, dtype=torch.float, device=self.device)
+                else:
+                    y = torch.tensor(y, dtype=torch.float, device=self.device)
+                wts = torch.tensor(wts, dtype=torch.float, device=self.device)
 
                 y_ = self._regression(prot=prot, words=x, roots=rts,
                                       spans=sps, context_roots=croots,
                                       context_spans=csps, hand_feats=hfts)
 
-                for attr in self.all_attributes[prot]:
-                    losses[attr] = self._loss_function(y_[attr], y[attr])
-                    if not self._continuous:
-                        losses[attr] = torch.matmul(losses[attr], wts[attr]).squeeze() / len(losses[attr])
-                loss = sum(losses.values())
+                loss = self._loss_function(y_, y)
+                # loss = torch.sum(loss * wts)
                 loss.backward()
                 optimizer.step()
                 loss_trace.append(float(loss.data))
@@ -481,17 +471,17 @@ class MLPTrainer:
             y_ = []
             loss_trace = []
             self._regression = self._regression.train()
-            # if early_stop_acc[-1] - early_stop_acc[-2] < 0:
-            #     break
-            # else:
-            name_of_model = (prot + str(self._regression.layers) +
-                             # self.att_type['arg']['repr'] + "_" +
-                             # self.att_type['arg']['context'] + "_" +
-                             # self.att_type['pred']['repr'] + "_" +
-                             # self.att_type['pred']['context'] + "_" +
-                             str(epoch))
-            Path = expanduser('~') + "/Desktop/saved_models/" + name_of_model
-            torch.save(self._regression.state_dict(), Path)
+            if early_stop_acc[-1] - early_stop_acc[-2] < -0.01:
+                break
+            else:
+                name_of_model = (prot + str(self._regression.layers) +
+                                 self.att_type['arg']['repr'] + "_" +
+                                 self.att_type['arg']['context'] + "_" +
+                                 self.att_type['pred']['repr'] + "_" +
+                                 self.att_type['pred']['context'] + "_" +
+                                 str(epoch))
+                Path = expanduser('~') + "/Desktop/saved_models/" + name_of_model
+                torch.save(self._regression.state_dict(), Path)
 
     def _print_metric(self, prot, loss_trace, dev_preds, dev_y, dev_wts):
         '''
@@ -562,10 +552,11 @@ class MLPTrainer:
                                      spans=sps, context_roots=ctx_root,
                                      context_spans=ctx_span,
                                      hand_feats=hfts)
-            for attr in attributes:
+            y_dev = y_dev > 0.5
+            for ind, attr in enumerate(attributes):
                 if self._continuous:
-                    predictions[attr] = np.concatenate([predictions[attr], y_dev[attr].detach().cpu().numpy()])
+                    predictions[attr] = np.concatenate([predictions[attr], y_dev[:, ind].detach().cpu().numpy()])
                 else:
-                    predictions[attr] = np.concatenate([predictions[attr], torch.max(y_dev[attr], 1)[1].detach().cpu().numpy()])
+                    predictions[attr] = np.concatenate([predictions[attr], y_dev[:, ind].detach().cpu().numpy()])
             del y_dev
         return predictions
