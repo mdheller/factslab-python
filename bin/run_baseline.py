@@ -2,7 +2,7 @@ import argparse
 import pandas as pd
 import numpy as np
 from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1
+from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1, mean_absolute_error as mae, r2_score as r2
 from sklearn.utils import shuffle
 from predpatt import load_conllu, PredPatt, PredPattOpts
 from os.path import expanduser
@@ -147,6 +147,9 @@ if __name__ == "__main__":
     parser.add_argument('--model',
                         type=str,
                         default='mlp')
+    parser.add_argument('--modeltype',
+                        type=str,
+                        default='regression')
     parser.add_argument('--load_data',
                         action='store_true')
     parser.add_argument('--hand',
@@ -175,24 +178,24 @@ if __name__ == "__main__":
     home = expanduser('~')
 
     if args.prot == "arg":
-        datafile = home + '/Desktop/protocols/data/arg_long_data.tsv'
+        datafile = home + '/Desktop/protocols/data/noun_raw_data_norm_122118.tsv'
         attributes = ["part", "kind", "abs"]
         attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
         attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
                  "abs": "Abs.Confidence"}
     else:
-        datafile = home + '/Desktop/protocols/data/pred_long_data.tsv'
+        datafile = home + '/Desktop/protocols/data/pred_raw_data_norm_122118.tsv'
         attributes = ["part", "hyp", "dyn"]
         attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
         attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
                  "hyp": "Hyp.Confidence"}
 
     if args.load_data:
-        sys.exit('no')
+        # sys.exit('no')
         data = pd.read_csv(datafile, sep="\t")
         data = data.dropna()
-        data['Unique.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x["Span"]), axis=1)
-        data['Split.Sentence.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']), axis=1)
+        # data['Unique.ID'] = data.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x["Span"]), axis=1)
+        data['Split.Sentence.ID'] = data.apply(lambda x: x['Split'] + " sent_" + x['Sentence.ID'].split('_')[1], axis=1)
 
         # Load the sentences
         sentences = {}
@@ -238,9 +241,19 @@ if __name__ == "__main__":
             data[resp_conf + ".norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
             data_dev[resp_conf + ".norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
             data_test[resp_conf + ".norm"] = data_test.groupby('Annotator.ID')[resp_conf].transform(ridit)
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
-            data_test[resp + ".norm"] = data_test[resp].map(lambda x: 1 if x else 0)
+
+            data[resp + ".ridit"] = ((data.groupby('Annotator.ID')[resp].transform(ridit)) * 2 - 1)
+            data_dev[resp + ".ridit"] = ((data_dev.groupby('Annotator.ID')[resp].transform(ridit)) * 2 - 1)
+            data_test[resp + ".ridit"] = ((data_test.groupby('Annotator.ID')[resp].transform(ridit)) * 2 - 1)
+
+            if args.modeltype == "regression":
+                data[resp + ".norm"] = data[resp + ".ridit"] * data[resp_conf + ".norm"]
+                data_dev[resp + ".norm"] = data_dev[resp + ".ridit"] * data_dev[resp_conf + ".norm"]
+                data_test[resp + ".norm"] = data_test[resp + ".ridit"] * data_test[resp_conf + ".norm"]
+            else:
+                data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
+                data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
+                data_test[resp + ".norm"] = data_test[resp].map(lambda x: 1 if x else 0)
 
         # Shuffle the data
         data = shuffle(data).reset_index(drop=True)
@@ -253,13 +266,13 @@ if __name__ == "__main__":
         lemmas = data['Lemma'].tolist()
         sentences = data['Sentences'].tolist()
 
-        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf)).reset_index(drop=True)
+        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf, type="regression")).reset_index(drop=True)
         raw_dev_x = data_dev_mean['Structure'].tolist()
         dev_tokens = data_dev_mean['Root.Token'].tolist()
         dev_lemmas = data_dev_mean['Lemma'].tolist()
         dev_sentences = data_dev_mean['Sentences'].tolist()
 
-        data_test_mean = data_test.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf)).reset_index(drop=True)
+        data_test_mean = data_test.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf, type="regression")).reset_index(drop=True)
         raw_test_x = data_test_mean['Structure'].tolist()
         test_tokens = data_test_mean['Root.Token'].tolist()
         test_lemmas = data_test_mean['Lemma'].tolist()
@@ -307,29 +320,20 @@ if __name__ == "__main__":
             dict_feats[f] = 0
 
         x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_x, tokens, lemmas)])
-        y = {}
-        for attr in attributes:
-            y[attr] = data[attr_map[attr] + ".norm"].values
 
         dev_x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_dev_x, dev_tokens, dev_lemmas)])
 
         test_x_pd = pd.DataFrame([features_func(sent_feat=sent, token=token, lemma=lemma, dict_feats=dict_feats.copy(), prot=args.prot, concreteness=concreteness, lcs=lcs, l2f=lem2frame) for sent, token, lemma in zip(raw_test_x, test_tokens, test_lemmas)])
 
-        # Figure out which columns to drop(they're always zero)
-        # todrop1 = dev_x_pd.columns[(dev_x_pd == 0).all()].values.tolist()
-        # todrop = x_pd.columns[(x_pd == 0).all()].values.tolist()
-        # intdrop = [a for a in todrop if a not in todrop1]
-        # cols_to_drop = list(set(todrop) - set(intdrop))
-
         feature_names = (verbnet_classids, supersenses, frame_names, lcs_feats, conc_cols, lexical_feats, all_ud_feature_cols)
 
-        # x_pd = x_pd.drop(cols_to_drop, axis=1)
-        # dev_x_pd = dev_x_pd.drop(cols_to_drop, axis=1)
+        y = {}
         dev_y = {}
         test_y = {}
         for attr in attributes:
-            dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
-            test_y[attr] = data_test_mean[attr_map[attr] + ".norm"].values
+            y[attr] = data[attr_map[attr] + ".Norm"].values
+            dev_y[attr] = data_dev_mean[attr_map[attr] + ".Norm"].values
+            test_y[attr] = data_test_mean[attr_map[attr] + ".Norm"].values
 
         # get elmo values here
         x_elmo = get_elmo(sentences, tokens=tokens, batch_size=args.batch_size)
@@ -345,7 +349,8 @@ if __name__ == "__main__":
         dev_x_glove = np.array([glove_wts.loc[word] if word in glove_wts.index else glove_wts.loc["_UNK"]for word in dev_roots])
         test_x_glove = np.array([glove_wts.loc[word] if word in glove_wts.index else glove_wts.loc["_UNK"]for word in test_roots])
 
-        with open('data/' + args.prot + 'hand.pkl', 'wb') as fout, open('data/' + args.prot + 'train_elmo.pkl', 'wb') as train_elmo, open('data/' + args.prot + 'dev_elmo.pkl', 'wb') as dev_elmo, open('data/' + args.prot + 'test_elmo.pkl', 'wb') as test_elmo, open('data/' + args.prot + 'train_glove.pkl', 'wb') as train_glove, open('data/' + args.prot + 'dev_glove.pkl', 'wb') as dev_glove, open('data/' + args.prot + 'test_glove.pkl', 'wb') as test_glove:
+        path = '/data/venkat/pickled_data_' + args.modeltype + '/' + args.prot
+        with open(path + 'hand.pkl', 'wb') as fout, open(path + 'train_elmo.pkl', 'wb') as train_elmo, open(path + 'dev_elmo.pkl', 'wb') as dev_elmo, open(path + 'test_elmo.pkl', 'wb') as test_elmo, open(path + 'train_glove.pkl', 'wb') as train_glove, open(path + 'dev_glove.pkl', 'wb') as dev_glove, open(path + 'test_glove.pkl', 'wb') as test_glove:
             pickle.dump([x_pd, y, dev_x_pd, dev_y, test_x_pd, test_y, data, data_dev_mean, data_test_mean, feature_names], fout)
             pickle.dump(x_elmo, train_elmo)
             pickle.dump(dev_x_elmo, dev_elmo)
