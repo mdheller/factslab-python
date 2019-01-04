@@ -1,9 +1,9 @@
 import re
-# import numpy as np
 import pandas as pd
 from collections import defaultdict
 from pyparsing import nestedExpr
-
+from os.path import expanduser
+import pickle
 
 class LexicalConceptualStructureLexicon(object):
 
@@ -88,7 +88,7 @@ class LexicalConceptualStructureLexiconEntry(object):
 
 def eventivity(row):
     x = [int(a) for a in row['lcs_eventive']]
-    dyn = row['Is.Dynamic']
+    dyn = row['Is.Dynamic.Norm']
     if dyn in x:
         return 1
     else:
@@ -96,33 +96,29 @@ def eventivity(row):
 
 
 if __name__ == "__main__":
-    path = "/Users/venkat/Desktop/protocols/data/verbs-English.lcs"
-    lcs = LexicalConceptualStructureLexicon(path)
-
+    home = expanduser('~')
+    path = home + "/Desktop/protocols/data/verbs-English.lcs"
+    # lcs = LexicalConceptualStructureLexicon(path)
+    # with open(home + '/Downloads/lcs.pkl', 'wb') as f:
+    #     pickle.dump(lcs, f)
+    # print("Pickled")
+    with open(home + '/Downloads/lcs.pkl', 'rb') as f:
+        lcs = pickle.load(f)
     # Read annotations
-    datafile = "../../../protocols/data/pred_long_data.tsv"
-    response = ["Is.Particular", "Is.Hypothetical", "Is.Dynamic"]
-    response_conf = ["Part.Confidence", "Hyp.Confidence", "Dyn.Confidence"]
-    attributes = ["part", "hyp", "dyn"]
-    attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
-    attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
-             "hyp": "Hyp.Confidence"}
-    token_col = "Pred.Root.Token"
+    datafile = home + "/Desktop/protocols/data/pred_raw_data_norm_122218.tsv"
 
     data = pd.read_csv(datafile, sep="\t")
 
     # Split the datasets into train, dev, test
-    data_test = data[data['Split'] == 'test']
-    data_dev = data[data['Split'] == 'dev']
-    data = data[data['Split'] == 'train']
+    data = data[data['Split'].isin(['train', 'dev'])]
 
-    # Convert responses to 1s and 0s
-    for resp in response:
-        data[resp] = data[resp].astype(int)
+    dyn_lcs = data.groupby('Lemma')['Is.Dynamic.Norm'].apply(list).to_frame().reset_index()
+    dyn_lcs['lcs'] = dyn_lcs['Lemma'].map(lambda x: lcs.eventive(x.lower()) if x.lower() in lcs.verbs else -1)
+    num_of_lemmas = len(dyn_lcs)
+    dyn_lcs = dyn_lcs[dyn_lcs['lcs'] != -1]
+    dyn_lcs.set_index('Lemma', inplace=True)
+    dyn_lcs['dyn'] = dyn_lcs['Is.Dynamic.Norm'].apply(lambda x: [a > 0 for a in x])
+    dyn_lcs['comp'] = dyn_lcs.apply(lambda x: 1 if set(x['dyn']).intersection(set(x['lcs'])) else 0, axis=1)
 
-    data['lcs_eventive'] = data['Lemma'].map(lambda x: lcs.eventive(x) if x in lcs.verbs else -1)
-
-    dyn_check = data[data['lcs_eventive'] != -1]
-    dyn_check['compare'] = dyn_check.apply(lambda row: eventivity(row), axis=1)
-    print(len(dyn_check) / len(data))
-    print("LCS", sum(dyn_check['compare']) / len(dyn_check))
+    print("Percentage of lemmas found in lcs database:", len(dyn_lcs) / num_of_lemmas)
+    print("They share at least one sense:", sum(dyn_lcs['comp']) / len(dyn_lcs))

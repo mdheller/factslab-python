@@ -1,5 +1,5 @@
 import torch
-from torch.nn import Module, Linear, ModuleList, Dropout, L1Loss, BCELoss
+from torch.nn import Module, Linear, ModuleList, Dropout, L1Loss, BCELoss, KLDivLoss
 import numpy as np
 import pickle
 import argparse
@@ -9,6 +9,7 @@ from sklearn.metrics import accuracy_score as accuracy, mean_absolute_error as m
 from itertools import product
 from ast import literal_eval
 from factslab.utility import print_metrics as print_metrics
+from tqdm import tqdm
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
@@ -65,14 +66,14 @@ class simpleMLP(Module):
             if not self._continuous:
                 return torch.sigmoid(x), hidden
             else:
-                return torch.sigmoid(x), hidden
+                return x, hidden
                 # return x, hidden
         else:
             if not self._continuous:
                 return torch.sigmoid(x)
             else:
                 # return x
-                return torch.sigmoid(x)
+                return x
 
 
 def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
@@ -168,14 +169,16 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
     all_grid_params = list(product(grid_params['hidden_layer_sizes'], grid_params['alpha'], grid_params['dropout'], grid_params['activation']))
 
     # Minibatch y, x and dev_x
-    y = [[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))]
-    y = [np.array(y[i:i + batch_size]) for i in range(0, len(y), batch_size)]
+    y = np.array([[y[attributes[0]][i], y[attributes[1]][i], y[attributes[2]][i]] for i in range(len(y[attributes[0]]))])
+    y = [torch.tensor(y[i:i + batch_size], dtype=torch.float, device=device) for i in range(0, len(y), batch_size)]
     dev_y = np.array([[dev_y[attributes[0]][i], dev_y[attributes[1]][i], dev_y[attributes[2]][i]] for i in range(len(dev_y[attributes[0]]))])
     test_y = np.array([[test_y[attributes[0]][i], test_y[attributes[1]][i], test_y[attributes[2]][i]] for i in range(len(test_y[attributes[0]]))])
 
-    x = [np.array(x[i:i + batch_size]) for i in range(0, len(x), batch_size)]
-    dev_x = [np.array(dev_x[i:i + batch_size]) for i in range(0, len(dev_x), batch_size)]
-    test_x = [np.array(test_x[i:i + batch_size]) for i in range(0, len(test_x), batch_size)]
+    x = [torch.tensor(np.array(x[i:i + batch_size]), dtype=torch.float, device=device) for i in range(0, len(x), batch_size)]
+    dev_batch_size = 256
+    dev_x = [torch.tensor(np.array(dev_x[i:i + dev_batch_size]), dtype=torch.float, device=device) for i in range(0, len(dev_x), dev_batch_size)]
+    if test_on:
+        test_x = [torch.tensor(np.array(test_x[i:i + dev_batch_size]), dtype=torch.float, device=device) for i in range(0, len(test_x), dev_batch_size)]
 
     loss_wts = data.loc[:, [(attr_conf[attr] + ".Norm") for attr in attributes]].values
     loss_wts = [np.array(loss_wts[i:i + batch_size]) for i in range(0, len(loss_wts), batch_size)]
@@ -191,25 +194,21 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
                     output_size=y[0].shape[1], p_dropout=drp,
                     activation=act, continuous=is_data_continuous)
             clf.to(device)
-            loss_function = BCELoss()
+            loss_function = L1Loss()
             parameters = [p for p in clf.parameters() if p.requires_grad]
             optimizer = torch.optim.Adam(parameters, weight_decay=alpha)
             early_stopping = [1000]
             for epoch in range(20):
-                for x_, dev_x_, y_, wts in zip(x, dev_x, y, loss_wts):
+                for x_, y_ in zip(x, y):
                     optimizer.zero_grad()
 
-                    x_ = torch.tensor(x_, dtype=torch.float, device=device)
-                    dev_x_ = torch.tensor(dev_x_, dtype=torch.float, device=device)
-                    y_ = torch.tensor(y_, dtype=torch.float, device=device)
-                    wts = torch.tensor(wts, dtype=torch.float, device=device)
+                    # x_ = torch.tensor(x_, dtype=torch.float, device=device)
+                    # y_ = torch.tensor(y_, dtype=torch.float, device=device)
 
                     y_pred = clf(x_)
                     loss = loss_function(y_pred, y_)
-                    # loss = torch.sum(loss * wts) / batch_size
                     loss.backward()
                     optimizer.step()
-                    # loss_trace.append(float(loss.data))
                 clf = clf.eval()
                 y_pred_dev, _ = predict(clf, dev_x, device)
                 clf = clf.train()
@@ -235,6 +234,7 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
                     Path = "/data/venkat/saved_models/" + regression_type + "/" + name_of_model
                     torch.save(clf.state_dict(), Path)
         print(min(search_scores, key=lambda x: x[-1]), "\n")
+        del x, y, dev_x, test_x
     else:
         best_params = literal_eval(best_params)
         hidden_state, alpha, drp, act, _ = best_params
@@ -260,11 +260,12 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
         if not test_on:
             y_pred_dev, h = predict(clf, dev_x, device)
             # y = np.concatenate(y, axis=0)
+            # analysis(data_dev_mean, attributes, y_pred_dev, prot)
             print_metrics(attributes=attributes, attr_map=attr_map,
                           attr_conf=attr_conf, wts=dev_loss_wts,
-                          y_true=y, y_pred=y_pred_dev, fstr=abl_state,
+                          y_true=dev_y, y_pred=y_pred_dev, fstr=abl_state,
                           weighted=weighted, regression_type=regression_type)
-            # do_riemann(h, dev_y)
+            do_riemann(h, dev_y)
         else:
             y_pred_test, _ = predict(clf, test_x, device)
             print_metrics(attributes=attributes, attr_map=attr_map,
@@ -273,18 +274,37 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
                           weighted=weighted, regression_type=regression_type)
 
 
+def analysis(data, attributes, y_pred, prot):
+    '''
+        write predictions to file in a nice tsv format for analysis
+    '''
+    if prot == "arg":
+        columns = ['Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'part.Pred', 'Is.Kind.Norm', 'kind.Pred', 'Is.Abstract.Norm', 'abs.Pred']
+    else:
+        columns = ['Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'part.Pred', 'Is.Hypothetical.Norm', 'hyp.Pred', 'Is.Dynamic.Norm', 'dyn.Pred']
+
+    data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].tag, axis=1)
+    data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].gov_rel, axis=1)
+
+    for i, attr in enumerate(attributes):
+        data[attr + '.Pred'] = y_pred[:, i]
+    data = data.loc[:, columns]
+    data['Sentences'] = data['Sentences'].apply(lambda x: ' '.join(x))
+    data.to_csv('dev_preds_' + prot + '.tsv', sep='\t', index=False)
+
+
 def predict(clf, x, device):
-    predictions = np.empty((0, 3), int)
+    y = np.empty((0, 3), int)
     final_h_size = clf._linmaps[-2].weight.shape[0]
     h = np.empty((0, final_h_size), float)
-    for mb in x:
-        mb = torch.tensor(mb, dtype=torch.float, device=device)
-        preds, h_ = clf(mb, return_hidden=True)
+    for x_ in x:
+        # x_ = torch.tensor(x_, dtype=torch.float, device=device)
+        y_, h_ = clf(x_, return_hidden=True)
         if not clf._continuous:
-            preds = preds > 0.5
-        predictions = np.concatenate([predictions, preds.detach().cpu().numpy()])
+            y_ = y_ > 0.5
+        y = np.concatenate([y, y_.detach().cpu().numpy()])
         h = np.concatenate([h, h_[-2]])
-    return predictions, h
+    return y, h
 
 
 def do_riemann(h, y):
@@ -314,7 +334,7 @@ if __name__ == '__main__':
                         default='arg')
     parser.add_argument('--batch_size',
                         type=int,
-                        default=32)
+                        default=256)
     parser.add_argument('--typeabl',
                         type=int,
                         default=0)
@@ -344,7 +364,7 @@ if __name__ == '__main__':
                         help='Run test')
     parser.add_argument('--weighted',
                         action='store_true',
-                        help='Run test')
+                        help='Get weighted scores')
     parser.add_argument('--regressiontype',
                         type=str,
                         default="regression",

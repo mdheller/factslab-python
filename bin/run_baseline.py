@@ -178,13 +178,13 @@ if __name__ == "__main__":
     home = expanduser('~')
 
     if args.prot == "arg":
-        datafile = home + '/Desktop/protocols/data/noun_raw_data_norm_122118.tsv'
+        datafile = home + '/Desktop/protocols/data/noun_raw_data_norm_122218.tsv'
         attributes = ["part", "kind", "abs"]
         attr_map = {"part": "Is.Particular", "kind": "Is.Kind", "abs": "Is.Abstract"}
         attr_conf = {"part": "Part.Confidence", "kind": "Kind.Confidence",
                  "abs": "Abs.Confidence"}
     else:
-        datafile = home + '/Desktop/protocols/data/pred_raw_data_norm_122118.tsv'
+        datafile = home + '/Desktop/protocols/data/pred_raw_data_norm_122218.tsv'
         attributes = ["part", "hyp", "dyn"]
         attr_map = {"part": "Is.Particular", "dyn": "Is.Dynamic", "hyp": "Is.Hypothetical"}
         attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
