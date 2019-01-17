@@ -20,3 +20,4 @@ results/
 /bin/lcsreader.py
 /bin/analysis.py
 /bin/spr.py
+/bin/plot_bars.py
