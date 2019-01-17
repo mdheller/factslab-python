@@ -10,6 +10,8 @@ from collections import Iterable
 from .childsumtreelstm import *
 from torch.nn.utils.rnn import pad_packed_sequence
 from torch.nn.utils.rnn import pack_padded_sequence
+from math import sqrt
+from allennlp.modules.elmo import batch_to_ids
 
 
 class RNNRegression(torch.nn.Module):
@@ -75,8 +77,11 @@ class RNNRegression(torch.nn.Module):
 
         self.device = device
         self.batch_size = batch_size
-        # initialize model
-        self._initialize_embeddings(embeddings, vocab)
+        # self._initialize_embeddings(embeddings, vocab)
+        # ELMO
+        self.embeddings = embeddings
+        self.embeddings.requires_grad = False
+        self.embedding_size = 1024
         self._initialize_rnn(rnn_classes, rnn_hidden_sizes,
                              num_rnn_layers, bidirectional)
         self._initialize_regression(attention,
@@ -241,6 +246,7 @@ class RNNRegression(torch.nn.Module):
             self.has_batch_dim = True
         else:
             self.has_batch_dim = False
+            words = [words]
 
         inputs = self._get_inputs(words)
         inputs = self._preprocess_inputs(inputs)
@@ -270,7 +276,7 @@ class RNNRegression(torch.nn.Module):
                 h_all, (h_last, c_last) = rnn(packed)
                 h_all, _ = pad_packed_sequence(h_all, batch_first=True)
             else:
-                h_all, (h_last, c_last) = rnn(inputs.unsqueeze(0))
+                h_all, (h_last, c_last) = rnn(inputs)
             inputs = h_all.squeeze()
 
         return h_all, h_last
@@ -335,14 +341,15 @@ class RNNRegression(torch.nn.Module):
         return output.gather(1, idx).squeeze()
 
     def _get_inputs(self, inputs):
-        if self.has_batch_dim:
-            indices = []
-            for sent in inputs:
-                indices.append([self.vocab_hash[word] for word in sent])
-        else:
-            indices = [self.vocab_hash[word] for word in inputs]
+        # if self.has_batch_dim:
+            # indices = []
+            # for sent in inputs:
+            #     indices.append([self.vocab_hash[word] for word in sent])
+        # else:
+        #     indices = [self.vocab_hash[word] for word in inputs]
+        indices = batch_to_ids(inputs)
         indices = torch.tensor(indices, dtype=torch.long, device=self.device)
-        return self.embeddings(indices)
+        return self.embeddings(indices)['elmo_representations'][0]
 
     def word_embeddings(self, words=[]):
         """Extract the tuned word embeddings
@@ -467,9 +474,9 @@ class RNNRegressionTrainer(object):
         self._initialize_trainer_regression()
         parameters = [p for p in self._regression.parameters() if p.requires_grad]
 
-        # for name, param in self._regression.named_parameters():
-        #     if param.requires_grad:
-        #         print(name, param.shape)
+        for name, param in self._regression.named_parameters():
+            if param.requires_grad:
+                print(name, param.shape)
         # for k, v in self._regression.state_dict().items():
         #     print(k, type(v))
         optimizer = self._optimizer_class(parameters, **kwargs)
@@ -611,12 +618,19 @@ class RNNRegressionTrainer(object):
                 r_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][i][j] for j in range(Ns)]) for i in range(Ns)])
                 final_accuracy.append(accuracy)
 
+                TP = conf_mat[attr][1][1]
+                TN = conf_mat[attr][0][0]
+                FP = conf_mat[attr][1][0]
+                FN = conf_mat[attr][0][1]
+                matthews_corr = ((TP * TN) - (FP * FN)) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+
                 # F1 Score
                 f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
                 macro_acc = np.sum(p_macro) / Ns
                 print("Micro Accuracy:", accuracy)
                 print("Macro Accuracy:", macro_acc)
                 print("Macro F1 score:", f1)
+                print("Matthews correlation:", matthews_corr)
 
             early_stop.append(np.mean(final_accuracy))
             print("Change", early_stop[-1] - early_stop[-2], "\n")

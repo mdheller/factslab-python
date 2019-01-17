@@ -1,7 +1,7 @@
 import sys
 import torch
 import torch.nn.functional as F
-
+import pdb
 from abc import ABCMeta, abstractmethod
 from factslab.datastructures import ConstituencyTree
 from torch.nn.modules.dropout import Dropout
@@ -11,7 +11,7 @@ if sys.version_info.major == 3:
     from functools import lru_cache
 else:
     from functools32 import lru_cache
-import pdb
+
 
 class ChildSumTreeLSTM(RNNBase):
     """A bidirectional extension of child-sum tree LSTMs
@@ -40,7 +40,7 @@ class ChildSumTreeLSTM(RNNBase):
         """
         Parameters
         ----------
-        inputs : torch.autograd.Variable
+        inputs : torch.Tensor
             a 2D (steps x embedding dimension) or a 3D tensor (steps x
             batch dimension x embedding dimension); the batch
             dimension must always have size == 1, since this module
@@ -54,8 +54,8 @@ class ChildSumTreeLSTM(RNNBase):
 
         Returns
         -------
-        hidden_all : torch.autograd.Variable
-        hidden_final : torch.autograd.Variable
+        hidden_all : torch.Tensor
+        hidden_final : torch.Tensor
             the hidden state of the trees root node; if there are two
             or more such nodes, the average of their hidden states is
             returned
@@ -71,8 +71,8 @@ class ChildSumTreeLSTM(RNNBase):
         for layer in range(self.num_layers):
             self.hidden_state[layer] = {'up': {}, 'down': {}}
             self.cell_state[layer] = {'up': {}, 'down': {}}
+
             for i in ridx:
-                # pdb.set_trace()
                 self._upward_downward(layer, 'up', inputs, tree, i)
 
         # sort the indices; only really matters for constituency trees,
@@ -116,21 +116,30 @@ class ChildSumTreeLSTM(RNNBase):
             return h_t, c_t
 
         x_t = self._construct_x_t(layer, inputs, idx, tree)
+
         oidx, (h_prev, c_prev) = self._construct_previous(layer, direction,
                                                           inputs, tree, idx)
 
         if self.bias:
             Wih, Whh, bih, bhh = self._get_parameters(layer, direction)
-            # pdb.set_trace()
+
+            # print(Wih.size())
+            # print(Whh.size())
+            # print(bih.size())
+            # print(bhh.size())
+
+            # print(x_t.size())
+            # print(h_prev.size())
+
             fcio_t_raw = torch.matmul(Whh, h_prev) +\
                 torch.matmul(Wih, x_t[:, None]) +\
                 bhh[:, None] + bih[:, None]
 
         else:
             Wih, Whh = self._get_parameters(layer, direction)
-            # pdb.set_trace()
-            # PROBLEM IS HERE!! x_t is 1x1 tensor WHY??
-            fcio_t_raw = torch.matmul(Whh, h_prev) + torch.matmul(Wih, x_t[:, None])
+
+            fcio_t_raw = torch.matmul(Whh, h_prev) +\
+                torch.matmul(Wih, x_t[:, None])
 
         f_t_raw, c_hat_t_raw, i_t_raw, o_t_raw = torch.split(fcio_t_raw,
                                                              self.hidden_size,
@@ -160,7 +169,6 @@ class ChildSumTreeLSTM(RNNBase):
         self.hidden_state[layer][direction][idx] = h_t
         self.cell_state[layer][direction][idx] = c_t
 
-        # If bidirectional, do opposite direction
         if direction == 'up' and self.bidirectional:
             self._upward_downward(layer, 'down', inputs, tree, idx)
 
@@ -197,7 +205,7 @@ class ChildSumTreeLSTM(RNNBase):
             bihattrname = 'bias_ih_l{}{}'.format(str(layer), dirtag)
 
             bih, bhh = getattr(self, bihattrname), getattr(self, bhhattrname)
-            # pdb.set_trace()
+
             return Wih, Whh, bih, bhh
 
         else:
