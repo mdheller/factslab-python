@@ -1,6 +1,7 @@
 import torch
 from torch.nn import Module, Linear, ModuleList, Dropout, L1Loss, BCELoss, KLDivLoss
 import numpy as np
+import pandas as pd
 import pickle
 import argparse
 import random
@@ -260,12 +261,12 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
         if not test_on:
             y_pred_dev, h = predict(clf, dev_x, device)
             # y = np.concatenate(y, axis=0)
-            # analysis(data_dev_mean, attributes, y_pred_dev, prot)
+            analysis(data_dev_mean, attributes, y_pred_dev, prot, attr_map)
             print_metrics(attributes=attributes, attr_map=attr_map,
                           attr_conf=attr_conf, wts=dev_loss_wts,
                           y_true=dev_y, y_pred=y_pred_dev, fstr=abl_state,
                           weighted=weighted, regression_type=regression_type)
-            do_riemann(h, dev_y)
+#             do_riemann(h, dev_y)
         else:
             y_pred_test, _ = predict(clf, test_x, device)
             print_metrics(attributes=attributes, attr_map=attr_map,
@@ -274,20 +275,26 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
                           weighted=weighted, regression_type=regression_type)
 
 
-def analysis(data, attributes, y_pred, prot):
+def analysis(data, attributes, y_pred, prot, attr_map):
     '''
         write predictions to file in a nice tsv format for analysis
     '''
     if prot == "arg":
-        columns = ['Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'part.Pred', 'Is.Kind.Norm', 'kind.Pred', 'Is.Abstract.Norm', 'abs.Pred']
+        columns = ['Unique.ID', 'Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'Is.Particular.Pred', 'Is.Kind.Norm', 'Is.Kind.Pred', 'Is.Abstract.Norm', 'Is.Abstract.Pred']
+        data['Root.Token.New'] = pd.to_numeric(data['Root.Token'])
+        data['Root.Token.New'] += 1         # 1-indexing
+        data['Unique.ID'] = data['Sentence.ID'] + "_" + data['Root.Token.New'].map(lambda x: str(x))
     else:
-        columns = ['Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'part.Pred', 'Is.Hypothetical.Norm', 'hyp.Pred', 'Is.Dynamic.Norm', 'dyn.Pred']
+        columns = ['Unique.ID', 'Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'Is.Particular.Pred', 'Is.Hypothetical.Norm', 'Is.Hypothetical.Pred', 'Is.Dynamic.Norm', 'Is.Dynamic.Pred']
+        data['Span.New'] = data['Span'].apply(lambda x: ",".join([str(int(y) + 1) for y in x.split(',')]))    # 1-indexing
+        data['Unique.ID'] = data['Sentence.ID'] + "_" + data['Span.New']
 
     data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].tag, axis=1)
     data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].gov_rel, axis=1)
 
     for i, attr in enumerate(attributes):
-        data[attr + '.Pred'] = y_pred[:, i]
+        data[attr_map[attr] + '.Pred'] = y_pred[:, i]
+
     data = data.loc[:, columns]
     data['Sentences'] = data['Sentences'].apply(lambda x: ' '.join(x))
     data.to_csv('dev_preds_' + prot + '.tsv', sep='\t', index=False)
