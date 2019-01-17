@@ -12,6 +12,8 @@ import pickle
 from collections import Counter
 from allennlp.commands.elmo import ElmoEmbedder
 import torch
+from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1, mean_absolute_error as mae, r2_score as r2
+from scipy.stats import spearmanr, pearsonr, mode
 
 
 def load_glove_embedding(fpath, vocab, prot=''):
@@ -28,8 +30,9 @@ def load_glove_embedding(fpath, vocab, prot=''):
     zipname = os.path.split(fpath)[-1]
     size, dim = zipname.split('.')[1:3]
     fpathout = prot + 'glove.' + size + '.' + dim + '.filtered.txt'
-    if fpathout in os.listdir(os.getcwd()):
-        embedding = pd.read_csv(fpathout, index_col=0, header=None, sep=' ')
+    path = os.path.expanduser('~') + '/Downloads/embeddings/'
+    if fpathout in os.listdir(path):
+        embedding = pd.read_csv(path + fpathout, index_col=0, header=None, sep=' ')
 
     else:
         fname = 'glove.' + size + '.' + dim + '.txt'
@@ -50,7 +53,7 @@ def load_glove_embedding(fpath, vocab, prot=''):
         pad = pd.DataFrame([np.zeros(len(mean_emb))], index=PADDING_ELEMENT)
 
         embedding = pd.concat([embedding, oov, pad], axis=0)
-        embedding.to_csv(fpathout, sep=' ', header=False)
+        embedding.to_csv(path + fpathout, sep=' ', header=False)
 
     return embedding
 
@@ -58,7 +61,7 @@ def load_glove_embedding(fpath, vocab, prot=''):
 def load_elmo_embedding(sentences):
     '''
         Takes in list of sentences, batches it and returns embeddings of
-        shape num_sentences * longest_sentence_length * (3*1024) 
+        shape num_sentences * longest_sentence_length * (3*1024)
     '''
     embeddings = 0
     return embeddings
@@ -154,7 +157,7 @@ def interleave_lists(l1, l2):
     return [item for slist in zip_longest(l1, l2) for item in slist if item is not None]
 
 
-def dev_mode_group(group, attributes, attr_map, attr_conf):
+def dev_mode_group(group, attributes, attr_map, attr_conf, type):
     '''
         Takes a group from dev data, and returns the (first) mode answer - with mean confidence if all annotations are same, or by changing the conf of non-mode annotations to 1-conf first, then taking the mean of confidences
 
@@ -172,10 +175,13 @@ def dev_mode_group(group, attributes, attr_map, attr_conf):
 
     mode_row = group.iloc[0]
     for attr in attributes:
-        if len(group[attr_map[attr] + ".norm"].unique()) != 1:
-            mode_row[attr_map[attr] + ".norm"] = group[attr_map[attr] + ".norm"].mode()[0]
-            group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"] = 1 - group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"]
-        mode_row[attr_conf[attr] + ".norm"] = group[attr_conf[attr] + ".norm"].mean()
+        if type == "multinomial":
+            if len(group[attr_map[attr] + ".norm"].unique()) != 1:
+                mode_row[attr_map[attr] + ".norm"] = group[attr_map[attr] + ".norm"].mode()[0]
+                group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"] = 1 - group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"]
+            mode_row[attr_conf[attr] + ".norm"] = group[attr_conf[attr] + ".norm"].mean()
+        else:
+            mode_row[attr_map[attr] + ".Norm"] = group[attr_map[attr] + ".Norm"].mean()
     return mode_row
 
 
@@ -515,6 +521,7 @@ def get_elmo(sentences, tokens, batch_size):
     '''
         Returns numpy array of reduced elmo representations
     '''
+
     x = []
     sentences = [sentences[j: j + batch_size] for j in range(0, len(sentences), batch_size)]
     tokens = [tokens[j: j + batch_size] for j in range(0, len(tokens), batch_size)]
@@ -539,3 +546,49 @@ def choose_tokens(batch, lengths):
     '''
     idx = (lengths).unsqueeze(2).expand(-1, -1, batch.shape[2])
     return batch.gather(1, idx).squeeze()
+
+
+def r1_score(y_true, y_pred, sample_weight=None, avg='weighted'):
+    '''
+        Returns proportion of absolute error explained
+        r1_score = 1 - (model MAE) / (baseline MAE)
+    '''
+
+    if len(y_true.shape) == 1:
+        baseline_mae = mae(y_true, [np.mean(y_true, axis=0) for i in range(len(y_true))], sample_weight=sample_weight)
+        model_mae = mae(y_true, y_pred, sample_weight=sample_weight)
+        r1 = 1 - (model_mae / baseline_mae)
+    else:
+        if not sample_weight:
+            baseline_mae = [mae(y_true[:, ij], [np.mean(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=None) for ij in range(3)]
+            model_mae = [mae(y_true[:, ij], y_pred[:, ij], sample_weight=None) for ij in range(3)]
+        else:
+            baseline_mae = [mae(y_true[:, ij], [np.mean(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=sample_weight[:, ij]) for ij in range(3)]
+            model_mae = [mae(y_true[:, ij], y_pred[:, ij], sample_weight=sample_weight[:, ij]) for ij in range(3)]
+
+        r1 = 0
+        if avg == "normal":
+            factor = [(1 / 3) for i in range(3)]
+        else:
+            factor = [(model_mae[i] / np.sum(model_mae)) for i in range(3)]
+
+        for ind in range(len(model_mae)):
+            r1 += factor[ind] * (1 - (model_mae[ind] / baseline_mae[ind]))
+
+    return r1
+
+
+def print_metrics(attributes, attr_map, attr_conf, wts, y_true, y_pred, fstr,
+                  regression_type, weighted=False):
+    sigdig = 1
+    if regression_type == "regression":
+        if not weighted:
+            print(mae(y_true, y_pred))
+            print(fstr, '&', np.round(pearsonr(y_true[:, 0], y_pred[:, 0])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 0], y_pred[:, 0]) * 100, sigdig), '&', np.round(pearsonr(y_true[:, 1], y_pred[:, 1])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 1], y_pred[:, 1]) * 100, sigdig), '&', np.round(pearsonr(y_true[:, 2], y_pred[:, 2])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 2], y_pred[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred) * 100, sigdig), "\\\\")
+        else:
+            print(fstr, '&', np.round(spearmanr(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(spearmanr(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(spearmanr(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred, sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred, multioutput="variance_weighted", sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), "\\\\")
+    else:
+        if not weighted:
+            print(fstr, '&', np.round(precision(y_true[:, 0], y_pred[:, 0]) * 100, sigdig), '&', np.round(recall(y_true[:, 0], y_pred[:, 0]) * 100, sigdig), '&', '&', np.round(precision(y_true[:, 1], y_pred[:, 1]) * 100, sigdig), '&', np.round(recall(y_true[:, 1], y_pred[:, 1]) * 100, sigdig), '&', np.round(f1(y_true[:, 1], y_pred[:, 1]) * 100, sigdig), '&', np.round(precision(y_true[:, 2], y_pred[:, 2]) * 100, sigdig), '&', np.round(recall(y_true[:, 2], y_pred[:, 2]) * 100, sigdig), '&', np.round(f1(y_true[:, 2], y_pred[:, 2]) * 100, sigdig), '&', np.round(f1(y_true, y_pred, average='micro') * 100, sigdig), '&', np.round(f1(y_true, y_pred, average='macro') * 100, sigdig), '&', np.round(accuracy(y_true, y_pred) * 100, sigdig), "\\\\")
+        else:
+            print(fstr, '&', np.round(precision(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(recall(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(f1(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(precision(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(recall(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(f1(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(precision(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(recall(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(f1(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(f1(y_true, y_pred, average='micro', sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), '&', np.round(f1(y_true, y_pred, average='macro', sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), '&', np.round(accuracy(y_true, y_pred, sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), "\\\\")
