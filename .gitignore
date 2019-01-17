@@ -14,3 +14,10 @@ results/
 *.jpg
 *.jpeg
 *.pdf
+/bin/concrete.py
+/bin/factuality.py
+/bin/gmm.py
+/bin/lcsreader.py
+/bin/analysis.py
+/bin/spr.py
+/bin/plot_bars.py
