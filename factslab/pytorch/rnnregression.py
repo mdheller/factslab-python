@@ -5,16 +5,13 @@ import torch.autograd
 import torch.nn.functional as F
 from torch.nn import Parameter
 from torch.nn import LSTM
-from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
-from scipy.special import huber
-import pdb
-from random import shuffle
+from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss, Dropout
 from collections import Iterable
-from factslab.utility import partition
 from .childsumtreelstm import *
 from torch.nn.utils.rnn import pad_packed_sequence
 from torch.nn.utils.rnn import pack_padded_sequence
-import sys
+from math import sqrt
+from allennlp.modules.elmo import batch_to_ids
 
 
 class RNNRegression(torch.nn.Module):
@@ -74,18 +71,22 @@ class RNNRegression(torch.nn.Module):
                  rnn_classes=LSTM, rnn_hidden_sizes=300,
                  num_rnn_layers=1, bidirectional=False, attention=False,
                  regression_hidden_sizes=[], output_size=1,
-                 device=torch.device(type="cpu"), batch_size=128):
+                 device=torch.device(type="cpu"), batch_size=128,
+                 attributes=["part"]):
         super().__init__()
 
         self.device = device
         self.batch_size = batch_size
-        # initialize model
-        self._initialize_embeddings(embeddings, vocab)
+        # self._initialize_embeddings(embeddings, vocab)
+        # ELMO
+        self.embeddings = embeddings
+        self.embeddings.requires_grad = False
+        self.embedding_size = 1024
         self._initialize_rnn(rnn_classes, rnn_hidden_sizes,
                              num_rnn_layers, bidirectional)
         self._initialize_regression(attention,
                                     regression_hidden_sizes,
-                                    output_size)
+                                    output_size, attributes)
 
     def _homogenize_parameters(self, rnn_classes, rnn_hidden_sizes,
                                num_rnn_layers, bidirectional):
@@ -137,16 +138,19 @@ class RNNRegression(torch.nn.Module):
             self.vocab = embeddings.index
 
         # define embedding layer
-        self.embeddings = torch.nn.Embedding(self.num_embeddings, self.embedding_size,
-                                             padding_idx=None, max_norm=None,
-                                             norm_type=2, scale_grad_by_freq=False,
+        self.embeddings = torch.nn.Embedding(self.num_embeddings,
+                                             self.embedding_size,
+                                             max_norm=None,
+                                             norm_type=2,
+                                             scale_grad_by_freq=False,
                                              sparse=False)
 
         # copy the embeddings into the embedding layer
         if embeddings is not None:
             embeddings_torch = torch.from_numpy(embeddings.values)
             self.embeddings.weight.data.copy_(embeddings_torch)
-
+        # Turn off gradients on embeddings
+        self.embeddings.weight.requires_grad = False
         # construct the hash
         self.vocab_hash = {w: i for i, w in enumerate(self.vocab)}
 
@@ -163,7 +167,7 @@ class RNNRegression(torch.nn.Module):
         params_zipped = zip(self.rnn_classes, self.rnn_hidden_sizes,
                             self.num_rnn_layers, self.bidirectional)
 
-        for rnn_class, hsize, lnum, bi in params_zipped:
+        for i, (rnn_class, hsize, lnum, bi) in enumerate(params_zipped):
             input_size = output_size
             rnn = rnn_class(input_size=input_size,
                             hidden_size=hsize,
@@ -172,20 +176,18 @@ class RNNRegression(torch.nn.Module):
                             batch_first=True)
             rnn = rnn.to(self.device)
             self.rnns.append(rnn)
+            varname = '_rnn_' + str(i)
+            RNNRegression.__setattr__(self, varname, rnn)
             output_size = hsize * 2 if bi else hsize
 
         self.rnn_output_size = output_size
-        if self.batch_size > 1:
-            self.has_batch_dim = True
-        else:
-            self.has_batch_dim = False
 
-    def _initialize_regression(self, attention, hidden_sizes, output_size):
-        self.linear_maps = []
-
-        last_size = self.rnn_output_size
+    def _initialize_regression(self, attention, hidden_sizes, output_size, attributes):
+        self.attributes = attributes
+        self.linear_maps = {}
 
         self.attention = attention
+        self.dropout = Dropout()
 
         if self.attention:
             if self.has_batch_dim:
@@ -194,17 +196,24 @@ class RNNRegression(torch.nn.Module):
             else:
                 self.attention_map = Parameter(torch.zeros(last_size))
 
-        for h in hidden_sizes:
-            linmap = torch.nn.Linear(last_size, h)
+        for attr in self.attributes:
+            last_size = self.rnn_output_size
+            self.linear_maps[attr] = []
+            for i, h in enumerate(hidden_sizes):
+                linmap = torch.nn.Linear(last_size, h)
+                linmap = linmap.to(self.device)
+                self.linear_maps[attr].append(linmap)
+                varname = '_linear_map' + attr + str(i)
+                RNNRegression.__setattr__(self, varname, linmap)
+                last_size = h
+
+            linmap = torch.nn.Linear(last_size, output_size)
             linmap = linmap.to(self.device)
-            self.linear_maps.append(linmap)
-            last_size = h
+            self.linear_maps[attr].append(linmap)
+            varname = '_linear_map' + attr + str(len(hidden_sizes))
+            RNNRegression.__setattr__(self, varname, linmap)
 
-        linmap = torch.nn.Linear(last_size, output_size)
-        linmap = linmap.to(self.device)
-        self.linear_maps.append(linmap)
-
-    def forward(self, structures, targets):
+    def forward(self, structures, tokens, lengths, mode):
         """
         Parameters
         ----------
@@ -233,20 +242,27 @@ class RNNRegression(torch.nn.Module):
                   "a sequence of words"
             raise ValueError(msg)
 
-        inputs, targets, lengths = self._get_inputs(words, targets)
+        if isinstance(words[0], list):
+            self.has_batch_dim = True
+        else:
+            self.has_batch_dim = False
+            words = [words]
+
+        inputs = self._get_inputs(words)
         inputs = self._preprocess_inputs(inputs)
+
         h_all, h_last = self._run_rnns(inputs, structures, lengths)
 
         if self.attention:
             h_last = self._run_attention(h_all)
         else:
-            if self.has_batch_dim:
-                h_last = self.last_timestep(h_all, lengths)
-        h_last = self._run_regression(h_last)
+            h_last = self.choose_timestep(h_all, tokens)
+
+        h_last = self._run_regression(h_last, mode)
 
         y_hat = self._postprocess_outputs(h_last)
 
-        return y_hat, targets
+        return y_hat
 
     def _run_rnns(self, inputs, structures, lengths):
         '''
@@ -255,14 +271,12 @@ class RNNRegression(torch.nn.Module):
         for rnn, structure in zip(self.rnns, [structures]):
             if isinstance(rnn, ChildSumTreeLSTM):
                 h_all, h_last = rnn(inputs, structure)
-            elif isinstance(rnn, LSTM):
-                packed = pack_padded_sequence(inputs, list(lengths.data), batch_first=True)
+            elif isinstance(rnn, LSTM) and lengths is not None:
+                packed = pack_padded_sequence(inputs, lengths, batch_first=True)
                 h_all, (h_last, c_last) = rnn(packed)
                 h_all, _ = pad_packed_sequence(h_all, batch_first=True)
-            elif isinstance(rnn, GRU):
-                packed = pack_padded_sequence(inputs, list(lengths.data), batch_first=True)
-                h_all, h_last = rnn(packed)
-                h_all, _ = pad_packed_sequence(h_all, batch_first=True)
+            else:
+                h_all, (h_last, c_last) = rnn(inputs)
             inputs = h_all.squeeze()
 
         return h_all, h_last
@@ -285,15 +299,26 @@ class RNNRegression(torch.nn.Module):
             else:
                 return torch.bmm(att[:, None, :], h_all).squeeze()
 
-    def _run_regression(self, h_last):
-        for i, linear_map in enumerate(self.linear_maps):
-            if i:
-                h_last = self._regression_nonlinearity(h_last)
-            h_last = linear_map(h_last)
+    def _run_regression(self, h_in, mode):
+        # Neural davidsonian(simple)
+        # pdb.set_trace()
+        # h_shared = F.relu(torch.mm(self.attr_shared, h_last.unsqueeze(1)))
+        # h = {attr: None for attr in self.attributes}
+        # for attr in self.attributes:
+        #     h[attr] = torch.mm(torch.transpose(h_shared, 0, 1), self.attr_sp[attr]).squeeze()
+        h_last = {}
+        if mode == "train":
+            h_in = self.dropout(h_in)
+        for attr in self.attributes:
+            h_last[attr] = h_in
+            for i, linear_map in enumerate(self.linear_maps[attr]):
+                if i:
+                    h_last[attr] = self._regression_nonlinearity(h_last[attr])
+                h_last[attr] = linear_map(h_last[attr])
         return h_last
 
     def _regression_nonlinearity(self, x):
-        return F.tanh(x)
+        return F.relu(x)
 
     def _preprocess_inputs(self, inputs):
         """Apply some function(s) to the input embeddings
@@ -304,48 +329,27 @@ class RNNRegression(torch.nn.Module):
         """
         return inputs
 
-    def _pad_inputs(self, data, targets):
-        """
-            Pad input sequences so that each minibatch has same length
-        """
-        seq_len = torch.from_numpy(np.array([len(x) for x in data]))
-        sorted_seq_len, sorted_idx = seq_len.sort(descending=True)
-        sorted_data = torch.zeros((2,), dtype=torch.long, device=self.device)
-        sorted_data = sorted_data.new_full((len(data), sorted_seq_len[0]),
-                                      fill_value=0)
-        sorted_targets = torch.zeros((2,), dtype=torch.long, device=self.device)
-        sorted_targets = sorted_targets.new_full((len(targets),), fill_value=0,
-                                         dtype=torch.float, device=self.device)
-        m = 0
-        for x in sorted_idx:
-            sorted_data[m][0:len(data[x])] = torch.tensor(data[x], dtype=torch.long)
-            sorted_targets[m] = targets[x]
-            m += 1
-
-        return sorted_data, sorted_targets, sorted_seq_len
-
     def _postprocess_outputs(self, outputs):
         """Apply some function(s) to the output value(s)"""
-        return outputs.squeeze()
+        for attr in self.attributes:
+            outputs[attr] = outputs[attr].squeeze()
+        return outputs
 
-    def last_timestep(self, unpacked, lengths):
-        # Index of the last output for each sequence
-        idx = (lengths - 1).view(-1, 1).expand(unpacked.size(0), unpacked.size(2)).unsqueeze(1).to(self.device)
-        return unpacked.gather(1, idx).squeeze()
+    def choose_timestep(self, output, idxs):
+        # Index extraction for each sequence
+        idx = (idxs - 1).view(-1, 1).expand(output.size(0), output.size(2)).unsqueeze(1).to(self.device)
+        return output.gather(1, idx).squeeze()
 
-    def _get_inputs(self, inputs, targets):
-        if self.rnn_classes[0] == LSTM:
-            indices = []
-            for sent in inputs:
-                indices.append([self.vocab_hash[word] for word in sent])
-            indices, targets, lengths = self._pad_inputs(indices, targets)
-            indices = torch.tensor(indices, dtype=torch.long, device=self.device)
-            return self.embeddings(indices).squeeze(), targets, lengths
-        else:
-            indices = [self.vocab_hash[word] for word in inputs]
-            indices = torch.tensor(indices, dtype=torch.long,
-                                   device=self.device)
-            return self.embeddings(indices).squeeze(), targets, None
+    def _get_inputs(self, inputs):
+        # if self.has_batch_dim:
+            # indices = []
+            # for sent in inputs:
+            #     indices.append([self.vocab_hash[word] for word in sent])
+        # else:
+        #     indices = [self.vocab_hash[word] for word in inputs]
+        indices = batch_to_ids(inputs)
+        indices = torch.tensor(indices, dtype=torch.long, device=self.device)
+        return self.embeddings(indices)['elmo_representations'][0]
 
     def word_embeddings(self, words=[]):
         """Extract the tuned word embeddings
@@ -418,11 +422,13 @@ class RNNRegressionTrainer(object):
 
     def __init__(self, regression_type="linear",
                  optimizer_class=torch.optim.Adam,
-                 device=torch.device(type="cpu"), epochs=10,
-                 rnn_classes=LSTM, **kwargs):
+                 rnn_classes=LSTM,
+                 device="cpu", epochs=1, attributes=["part"],
+                 **kwargs):
         self._regression_type = regression_type
         self._optimizer_class = optimizer_class
         self.epochs = epochs
+        self.attributes = attributes
         self._init_kwargs = kwargs
         self.rnn_classes = rnn_classes
         self._continuous = regression_type != "multinomial"
@@ -432,24 +438,23 @@ class RNNRegressionTrainer(object):
         if self._continuous:
             self._regression = RNNRegression(device=self.device,
                                              rnn_classes=self.rnn_classes,
+                                             attributes=self.attributes,
                                              **self._init_kwargs)
         else:
-            if self.rnn_classes =='LSTM':
-                output_size = np.unique(self._Y[0]).shape[0]
-            else:
-                output_size = np.unique(self._Y).shape[0]
+            output_size = np.unique(self._Y[self.attributes[0]]).shape[0]
             self._regression = RNNRegression(output_size=output_size,
                                              device=self.device,
                                              rnn_classes=self.rnn_classes,
+                                             attributes=self.attributes,
                                              **self._init_kwargs)
 
         lf_class = self.__class__.loss_function_map[self._regression_type]
-        self._loss_function = lf_class()
+        self._loss_function = lf_class(reduce=False)
 
         self._regression = self._regression.to(self.device)
         self._loss_function = self._loss_function.to(self.device)
 
-    def fit(self, X, Y, batch_size=100, verbosity=1, **kwargs):
+    def fit(self, X, Y, batch_size=128, verbosity=1, loss_weights=None, tokens=None, lengths=None, dev=None, **kwargs):
         """Fit the LSTM regression
 
         Parameters
@@ -465,55 +470,85 @@ class RNNRegressionTrainer(object):
         """
 
         self._X, self._Y = X, Y
-
+        dev_x, dev_tokens, dev_y, dev_wts = dev
         self._initialize_trainer_regression()
+        parameters = [p for p in self._regression.parameters() if p.requires_grad]
 
-        optimizer = self._optimizer_class(self._regression.parameters(),
-                                          **kwargs)
+        for name, param in self._regression.named_parameters():
+            if param.requires_grad:
+                print(name, param.shape)
+        # for k, v in self._regression.state_dict().items():
+        #     print(k, type(v))
+        optimizer = self._optimizer_class(parameters, **kwargs)
 
+        self._Y_logprob = {}
         if not self._continuous:
-            Y_counts = np.bincount([y for batch in self._Y for y in batch])
-            self._Y_logprob = np.log(Y_counts) - np.log(np.sum(Y_counts))
+            for attr in self.attributes:
+                Y_counts = np.bincount([y for batch in self._Y[attr] for y in batch])
+                self._Y_logprob[attr] = np.log(Y_counts) - np.log(np.sum(Y_counts))
 
         # each element is of the form ((struct1, struct2, ...),
         #                              target)
-        structures_targets = list(zip(self._X, self._Y))
+        structures_targets = list(zip(self._X, tokens, lengths))
         loss_trace = []
-        targ_trace = []
+        loss_wts_trace = {}
+        targ_trace = {}
+        pred_trace = {}
+
+        for attr in self.attributes:
+            targ_trace[attr] = np.array([])
+            pred_trace[attr] = np.array([])
+            loss_wts_trace[attr] = np.array([])
+            early_stop = [0.0]
+
         epoch = 0
         while epoch < self.epochs:
             epoch += 1
-            print("Epoch:", epoch, "\n")
-            print("Progress" + "\t Metrics")
-            losses = []
+            if verbosity != 0:
+                print("Epoch:", epoch)
+                print("Progress" + "\t Metrics")
 
-            shuffle(structures_targets)
-            total = len(self._Y)
-            # part = partition(structures_targets, batch_size)
+            total = len(self._Y[self.attributes[0]])
+
             for i, structs_targs_batch in enumerate(structures_targets):
                 optimizer.zero_grad()
                 if self.rnn_classes == LSTM:
-                    structs, targs = structs_targs_batch
+                    structs, tokens, lengths = structs_targs_batch
+                    tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
+                    lengths = torch.tensor(lengths, dtype=torch.long, device=self.device)
+                    losses = {}
+                    loss_wts = {}
+                    targs = {}
+                    for attr in self.attributes:
+                        loss_wts[attr] = loss_weights[attr][i]
+                        targs[attr] = self._Y[attr][i]
+                        targ_trace[attr] = np.append(targ_trace[attr], targs[attr])
+                        loss_wts_trace[attr] = np.append(loss_wts_trace[attr], loss_wts[attr])
+                        loss_wts[attr] = torch.tensor(loss_wts[attr], dtype=torch.float, device=self.device)
 
-                    targ_trace += list(targs)
+                        if self._continuous:
+                            targs[attr] = torch.tensor(targs[attr], dtype=torch.long, device=self.device)
+                        else:
+                            targs[attr] = torch.tensor(targs[attr], dtype=torch.long, device=self.device)
 
-                    if self._continuous:
-                        targs = torch.tensor(targs, dtype=torch.float)
-                    else:
-                        targs = torch.tensor(int(targ), dtype=torch.long)
+                    predicted = self._regression(structures=structs,
+                                                 tokens=tokens,
+                                                 lengths=lengths,
+                                                 mode="train")
 
-                    targs = targs.to(self.device)
-                    predicted, targs = self._regression(structs, targs)
-                    if self._continuous:
-                        loss = self._loss_function(predicted, targs)
-                    else:
-                        loss = self._loss_function(predicted[None, :], targs)
-                    losses.append(loss)
+                    for attr in self.attributes:
+                        loss = self._loss_function(predicted[attr], targs[attr])
+                        losses[attr] = (torch.mm(loss_wts[attr][None, :], loss[:, None]).squeeze()) / len(loss)
+                        # losses[attr] = torch.sum(loss) / len(loss)
+                        pred_trace[attr] = np.append(pred_trace[attr], np.array([int(torch.max(p, 0)[1]) for p in predicted[attr]]))
                 else:
                     structs_targs = list(zip(structs_targs_batch[0],
-                                             structs_targs_batch[1]))
-                    for struct, targ in structs_targs:
-                        targ_trace.append(targ)
+                                             structs_targs_batch[1],
+                                             structs_targs_batch[2],
+                                             structs_targs_batch[3],
+                                             structs_targs_batch[4]))
+                    for struct, targ, loss_wt, token, length in structs_targs:
+                        targ_trace = np.append(targ_trace, targ)
 
                         if self._continuous:
                             targ = torch.tensor([targ], dtype=torch.float)
@@ -521,70 +556,110 @@ class RNNRegressionTrainer(object):
                             targ = torch.tensor([int(targ)], dtype=torch.long)
 
                         targ = targ.to(self.device)
-                        predicted, targ = self._regression(struct, targ)
-                        if self._continuous:
-                            loss = self._loss_function(predicted, targ)
-                        else:
-                            loss = self._loss_function(predicted[None, :], targ)
+                        predicted = self._regression(struct, length)
+                        for attr in self.attributes:
+                            if self._continuous:
+                                loss[attr] = loss_wt[attr] * self._loss_function(predicted[attr], targ[attr])
+                            else:
+                                loss[attr] = loss_wt[attr] * self._loss_function(predicted[None, :], targ)
 
-                        losses.append(loss)
+                            losses[attr].append(loss)
 
-                loss = sum(losses) / len(losses)
+                loss = sum(losses.values())
+                loss_trace.append(loss.data)
+
                 loss.backward()
-
                 optimizer.step()
-                losses = []
-                loss_trace.append(loss.item())
+
                 # TODO: generalize for non-linear regression
                 if verbosity:
-                    if not i % verbosity:
-                        progress = "{:.4f}".format(((i) / total) * 100)
-                        self._print_metric(progress, loss_trace, targ_trace)
+                    if not ((i + 1) % verbosity):
+                        progress = "{:.4f}".format((i / total) * 100)
+                        self._print_metric(progress, loss_trace, targ_trace, pred_trace, loss_wts_trace)
                         loss_trace = []
-                        targ_trace = []
+                        loss_wts_trace = {}
+                        targ_trace = {}
+                        pred_trace = {}
+                        for attr in self.attributes:
+                            targ_trace[attr] = np.array([])
+                            pred_trace[attr] = np.array([])
+                            loss_wts_trace[attr] = np.array([])
 
-    def _print_metric(self, progress, loss_trace, targ_trace):
+            # Implement early stopping here
+            print("VALIDATION")
+
+            Ns = 2
+            conf_mat = {}
+            wt_conf_mat = {}
+
+            for attr in self.attributes:
+                conf_mat[attr] = np.zeros((Ns, Ns))
+                wt_conf_mat[attr] = np.zeros((Ns, Ns))
+
+            predictions = self.predict(X=dev_x, tokens=dev_tokens)
+            for attr in self.attributes:
+                for i, output_all in enumerate(predictions):
+                    output = output_all[attr]
+                    target = dev_y[attr][i]
+                    wt = dev_wts[attr][i]
+                    _, ind = torch.max(output, 0)
+                    conf_mat[attr][int(ind)][int(target)] += 1
+                    wt_conf_mat[attr][int(ind)][int(target)] += wt * 1
+            final_accuracy = []
+            for attr in self.attributes:
+                print(attr)
+                print(conf_mat[attr])
+                # Accuracy
+                accuracy = sum([conf_mat[attr][i][i] for i in range(Ns)]) / np.sum(conf_mat[attr])
+
+                # Precision
+                p_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][j][i] for j in range(Ns)]) for i in range(Ns)])
+                # Recall
+                r_macro = np.array([conf_mat[attr][i][i] for i in range(Ns)]) / np.array([sum([conf_mat[attr][i][j] for j in range(Ns)]) for i in range(Ns)])
+                final_accuracy.append(accuracy)
+
+                TP = conf_mat[attr][1][1]
+                TN = conf_mat[attr][0][0]
+                FP = conf_mat[attr][1][0]
+                FN = conf_mat[attr][0][1]
+                matthews_corr = ((TP * TN) - (FP * FN)) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+
+                # F1 Score
+                f1 = np.sum(2 * (p_macro * r_macro) / (p_macro + r_macro)) / Ns
+                macro_acc = np.sum(p_macro) / Ns
+                print("Micro Accuracy:", accuracy)
+                print("Macro Accuracy:", macro_acc)
+                print("Macro F1 score:", f1)
+                print("Matthews correlation:", matthews_corr)
+
+            early_stop.append(np.mean(final_accuracy))
+            print("Change", early_stop[-1] - early_stop[-2], "\n")
+            # if early_stop[-1] < early_stop[-2]:
+            #     print("Early Stopping: ", early_stop)
+            #     break
+
+    def _print_metric(self, progress, loss_trace, targ_trace, pred_trace, loss_wts_trace):
 
         sigdig = 3
-        Y_flat = [y for batch in self._Y for y in batch]
-        if self._continuous:
-            resid_mean = np.mean(loss_trace)
+        model_mean_neglogprob = np.mean(loss_trace)
+        # targ_mean_neglogprob = 0
+        # for attr in self.attributes:
+        #     targ_mean_neglogprob -= np.mean([a * b for a, b in zip(loss_wts[attr], [self._Y_logprob[attr][int(x)] for x in targ_trace[attr]])])
+        # pnlp = 1. - (model_mean_neglogprob / targ_mean_neglogprob)
 
-            if self._regression_type == "linear":
-                targ_var = np.mean(np.square(np.array(targ_trace) - np.mean(Y_flat)))
-                r2 = 1. - (resid_mean / targ_var)
-                print(progress + "%" + '\t\t residual variance:\t', np.round(resid_mean, sigdig), '\n',
-                      ' \t\t total variance:\t', np.round(targ_var, sigdig), '\n',
-                      ' \t\t r-squared:\t\t', np.round(r2, sigdig), '\n')
+        # print(progress + "%" + '\t\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
+        #       ' \t\t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
+        #       ' \t\t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
+        #       # ' \t\t Accuracy on batch:\t', np.round(pnlp, sigdig), )
+        accuracy = {}
+        for attr in self.attributes:
+            accuracy[attr] = np.sum((pred_trace[attr] == targ_trace[attr]).astype(int) * loss_wts_trace[attr]) / np.sum(loss_wts_trace[attr])
+        print(progress + "%" + '\t\t Loss:\t', np.round(model_mean_neglogprob, sigdig), '\n',
+              '\t\t' + self.attributes[0] + ' accuracy:\t', np.round(accuracy[self.attributes[0]], sigdig), '\n',
+              '\t\t' + self.attributes[1] + ' accuracy:\t', np.round(accuracy[self.attributes[1]], sigdig), '\n',
+              '\t\t' + self.attributes[2] + ' accuracy:\t', np.round(accuracy[self.attributes[2]], sigdig), '\n')
 
-            elif self._regression_type == "robust":
-                ae = np.abs(targ_trace - np.median(Y_flat))
-                mae = np.mean(ae)
-                pmae = 1. - (resid_mean / mae)
-
-                print(progress + "%" + '\t\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
-                      ' \t\t total absolute error:\t\t', np.round(mae, sigdig), '\n',
-                      ' \t\t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
-
-            elif self._regression_type == "robust_smooth":
-                ae = huber(1., targ_trace - np.median(Y_flat))
-                mae = np.mean(ae)
-                pmae = 1. - (resid_mean / mae)
-
-                print(progress + "%" + '\t\t residual absolute error:\t', np.round(resid_mean, sigdig), '\n',
-                      ' \t\t total absolute error:\t\t', np.round(mae, sigdig), '\n',
-                      ' \t\t proportion absolute error:\t', np.round(pmae, sigdig), '\n')
-
-        else:
-            model_mean_neglogprob = np.mean(loss_trace)
-            targ_mean_neglogprob = -np.mean([self._Y_logprob[x] for x in targ_trace])
-            pnlp = 1. - (model_mean_neglogprob / targ_mean_neglogprob)
-
-            print(progress + "%" + '\t\t residual mean cross entropy:\t', np.round(model_mean_neglogprob, sigdig), '\n',
-                  ' \t\t total mean cross entropy:\t', np.round(targ_mean_neglogprob, sigdig), '\n',
-                  ' \t\t proportion entropy explained:\t', np.round(pnlp, sigdig), '\n')
-
-    def predict(self, X):
+    def predict(self, X, tokens):
         """Predict using the LSTM regression
 
         Parameters
@@ -593,44 +668,9 @@ class RNNRegressionTrainer(object):
             a matrix of structures (independent variables) with rows
             corresponding to a particular kind of RNN
         """
+        predictions = []
+        tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
+        for x, token in zip(X, tokens):
+            predictions.append(self._regression(structures=x, tokens=token, lengths=None, mode="test"))
 
-        predictions = [self._regression(struct) for struct in zip(*X)]
-
-        if self._continuous:
-            return np.array([p.data.cpu().numpy() for p in predictions])
-        else:
-            dist = np.array([p.data.cpu().numpy() for p in predictions])
-            return np.where(dist == np.max(dist, axis=1)[:, None])
-
-    def attention_weights(self, X):
-        """Compute what the LSTM regression is attending to
-
-        Parameters
-        ----------
-        X : iterable(iterable(object))
-            a matrix of structures (independent variables) with rows
-            corresponding to a particular kind of RNN
-
-        Returns
-        -------
-        list(np.array)
-        """
-        attention = [self._regression.attention_weights(struct)
-                     for struct in zip(*X)]
-        return [a.data.cpu().numpy() for a in attention]
-
-    def word_embeddings(self, words=[]):
-        """Extract the tuned word embeddings
-
-        If an empty list is passed, all word embeddings are returned
-
-        Parameters
-        ----------
-        words : list(str)
-            The words to get the embeddings for
-
-        Returns
-        -------
-        pandas.DataFrame
-        """
-        return self._regression.word_embeddings(words)
+        return predictions

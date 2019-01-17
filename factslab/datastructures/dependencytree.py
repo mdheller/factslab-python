@@ -17,6 +17,8 @@ class DependencyTree(nltk.Tree):
 
         # precompute positions
         self.positions = self.treepositions()
+        self.token = None
+        self.sentence = None
 
     def root_idx(self):
         return [()]
