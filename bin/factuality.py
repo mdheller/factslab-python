@@ -21,10 +21,13 @@ if __name__ == "__main__":
     fact_data['Unique.ID'] = fact_data.apply(lambda x: str(x['Sentence.ID']) + "_" + str(x["Pred.Token"] - 1), axis=1)
     fact_data = fact_data.groupby('Unique.ID', as_index=False).mean().reset_index(drop=True)
 
-    hyp_fact = pred_data.loc[:, ['Unique.ID', 'Is.Hypothetical.Norm']]
+    hyp_fact = pred_data.loc[:, ['Unique.ID', 'Is.Hypothetical.Norm', 'Is.Particular.Norm', 'Is.Dynamic.Norm']]
     fact_ids = fact_data['Unique.ID'].tolist()
     hyp_fact['Happened.Norm'] = hyp_fact['Unique.ID'].apply(lambda x: fact_data[fact_data['Unique.ID'] == x]['Happened.Norm'].iloc[0] if x in fact_ids else None)
     hyp_fact2 = hyp_fact.dropna()
     print(np.round(len(hyp_fact2) / len(hyp_fact), 2))
-    print("Spearman correlation: ", np.round(spearmanr(hyp_fact2['Is.Hypothetical.Norm'].values, hyp_fact2['Happened.Norm'].values)[0], 2))
-    print("Pearson correlation: ", np.round(pearsonr(hyp_fact2['Is.Hypothetical.Norm'].values, hyp_fact2['Happened.Norm'].values)[0], 2))
+    # asdf = hyp_fact2[(hyp_fact2['Is.Hypothetical.Norm']>1) & (hyp_fact2['Happened.Norm']<-1)]
+    for attr in ['Is.Hypothetical.Norm', 'Is.Particular.Norm', 'Is.Dynamic.Norm']:
+        print(attr)
+        print("Spearman correlation: ", np.round(spearmanr(hyp_fact2[attr].values, hyp_fact2['Happened.Norm'].values)[0], 2))
+        print("Pearson correlation: ", np.round(pearsonr(hyp_fact2[attr].values, hyp_fact2['Happened.Norm'].values)[0], 2))
