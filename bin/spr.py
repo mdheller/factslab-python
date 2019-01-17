@@ -26,12 +26,13 @@ if __name__ == "__main__":
     spr = pd.read_csv(datafile_, sep="\t")
     # pred token is 0 indexed in SPR
     spr['Unique.ID'] = spr.apply(lambda x: str(x['Sentence.ID']) + "_" + str(x["Arg.Tokens.Begin"]) + "_" + str(x["Arg.Tokens.End"]), axis=1)
-    spr = spr[spr['Is.Pilot'] == False]
+    spr = spr[~spr['Is.Pilot']]
     spr = spr.dropna()
 
     spr = spr[spr['Split'].isin(['train', 'dev'])]
 
-    properties = ['change_of_location', 'instigation', 'partitive', 'was_for_benefit', 'existed_after', 'was_used', 'change_of_possession', 'existed_during', 'sentient', 'volition', 'change_of_state_continuous', 'awareness', 'existed_before', 'change_of_state']
+    # properties = ['change_of_location', 'instigation', 'partitive', 'was_for_benefit', 'existed_after', 'was_used', 'change_of_possession', 'existed_during', 'sentient', 'volition', 'change_of_state_continuous', 'awareness', 'existed_before', 'change_of_state']
+    properties = ['volition', 'awareness', 'sentient', 'change_of_location', 'instigation', 'change_of_state', 'was_used', 'change_of_possession', 'partitive', 'was_for_benefit', 'existed_before', 'existed_during', 'existed_after']
     # arg_ids = list(set(arg['Unique.ID'].tolist()))
     print("Arg\n")
     for prop in properties:
