@@ -1,4 +1,6 @@
 # A script to print sentence ids and corresponding sentence
+# It can also print dependency tree structures
+
 # from nltk import DependencyGraph
 import re
 from os.path import expanduser
@@ -13,15 +15,15 @@ def html_ify(s):
     html_string = re.sub(r'\(', r'&lcrb;', html_string)
     return html_string
 
-
-files = ['/UD_English-r1.2/en-ud-train.conllu',
-         '/UD_English-r1.2/en-ud-dev.conllu',
-         '/UD_English-r1.2/en-ud-test.conllu']
+home = expanduser("~")
+files = ['/Downloads/UD_English-r1.2/en-ud-train.conllu',
+         '/Downloads/UD_English-r1.2/en-ud-dev.conllu',
+         '/Downloads/UD_English-r1.2/en-ud-test.conllu']
 home = expanduser("~/Downloads/")
 structures = []
 
 # Delete file if it already exists since it'll be opened in append mode
-struct_path = expanduser("~/Desktop") + "/protocols/data/structures.tsv"
+struct_path = home + "/Research/protocols/data/UD_sentences.tsv"
 remove(struct_path)
 
 for file in files:
