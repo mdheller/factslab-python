@@ -3,7 +3,6 @@ from os.path import expanduser
 import numpy as np
 import pandas as pd
 from zipfile import ZipFile
-from torch import from_numpy, sort
 from sklearn.utils import shuffle
 from itertools import zip_longest
 from nltk.corpus import wordnet, framenet, verbnet
@@ -93,8 +92,8 @@ def arrange_inputs(data_batch, targets_batch, wts_batch, tokens_batch, attribute
             sorted_wts_batch[attr] = []
 
         for data, tokens in zip(data_batch, tokens_batch):
-            seq_len = from_numpy(np.array([len(x) for x in data]))
-            sorted_seq_len, sorted_idx = sort(seq_len, descending=True)
+            seq_len = torch.from_numpy(np.array([len(x) for x in data]))
+            sorted_seq_len, sorted_idx = torch.sort(seq_len, descending=True)
             # max_len = sorted_seq_len[0]
             sorted_seq_len_batch.append(np.array(sorted_seq_len))
             sorted_data = [data[x] for x in sorted_idx]
