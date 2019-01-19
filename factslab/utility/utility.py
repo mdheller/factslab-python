@@ -555,15 +555,15 @@ def r1_score(y_true, y_pred, sample_weight=None, avg='weighted'):
     '''
 
     if len(y_true.shape) == 1:
-        baseline_mae = mae(y_true, [np.mean(y_true, axis=0) for i in range(len(y_true))], sample_weight=sample_weight)
+        baseline_mae = mae(y_true, [np.median(y_true, axis=0) for i in range(len(y_true))], sample_weight=sample_weight)
         model_mae = mae(y_true, y_pred, sample_weight=sample_weight)
         r1 = 1 - (model_mae / baseline_mae)
     else:
         if not sample_weight:
-            baseline_mae = [mae(y_true[:, ij], [np.mean(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=None) for ij in range(3)]
+            baseline_mae = [mae(y_true[:, ij], [np.median(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=None) for ij in range(3)]
             model_mae = [mae(y_true[:, ij], y_pred[:, ij], sample_weight=None) for ij in range(3)]
         else:
-            baseline_mae = [mae(y_true[:, ij], [np.mean(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=sample_weight[:, ij]) for ij in range(3)]
+            baseline_mae = [mae(y_true[:, ij], [np.median(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=sample_weight[:, ij]) for ij in range(3)]
             model_mae = [mae(y_true[:, ij], y_pred[:, ij], sample_weight=sample_weight[:, ij]) for ij in range(3)]
 
         r1 = 0
@@ -583,7 +583,7 @@ def print_metrics(attributes, attr_map, attr_conf, wts, y_true, y_pred, fstr,
     sigdig = 1
     if regression_type == "regression":
         if not weighted:
-            print(mae(y_true, y_pred))
+#             print(mae(y_true, y_pred))
             print(fstr, '&', np.round(pearsonr(y_true[:, 0], y_pred[:, 0])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 0], y_pred[:, 0]) * 100, sigdig), '&', np.round(pearsonr(y_true[:, 1], y_pred[:, 1])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 1], y_pred[:, 1]) * 100, sigdig), '&', np.round(pearsonr(y_true[:, 2], y_pred[:, 2])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 2], y_pred[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred) * 100, sigdig), "\\\\")
         else:
             print(fstr, '&', np.round(spearmanr(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(spearmanr(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(spearmanr(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred, sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred, multioutput="variance_weighted", sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), "\\\\")
