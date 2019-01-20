@@ -184,8 +184,7 @@ def dev_mode_group(group, attributes, type):
     return mode_row
 
 
-def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
-              sentences, batch_size):
+def read_data(prot, datafile, attributes, regressiontype, sentences, batch_size):
     '''
         Reads datafiles, and create minibatched(if desired) lists
         of x, y, tokens, spans, context_roots, context_spans, loss_wts
@@ -211,16 +210,14 @@ def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
 
     # Ridit scoring annotations and confidence ratings
     for attr in attributes:
-        resp = attr_map[attr]
-        resp_conf = attr_conf[attr]
-        data[resp_conf + ".norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
-        data_dev[resp_conf + ".norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
+        data[attr + ".Norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
+        data_dev[attr + ".Conf.Norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
         if regressiontype == "multinomial":
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
+            data[attr + ".Norm"] = data[attr].map(lambda x: 1 if x else 0)
+            data_dev[attr + ".Norm"] = data_dev[attr].map(lambda x: 1 if x else 0)
         elif regressiontype == "linear":
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else -1) * data[resp_conf + ".norm"]
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else -1) * data_dev[resp_conf + ".norm"]
+            data[attr + ".Norm"] = data[attr].map(lambda x: 1 if x else -1) * data[attr + ".Conf.Norm"]
+            data_dev[attr + ".Norm"] = data_dev[resp].map(lambda x: 1 if x else -1) * data_dev[resp_conf + ".Conf.Norm"]
 
     # Shuffle the data
     data = shuffle(data).reset_index(drop=True)
@@ -239,18 +236,15 @@ def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
     # Form tuples from the contexts
     spans = [[datum[:] for datum in data['Span'].values.tolist()][i:i + batch_size] for i in range(0, len(data["Span"]), batch_size)]
 
-    # y = [{attr: (data[attr_map[attr] + ".norm"].values[i:i + batch_size]) for attr in attributes} for i in range(0, len(data[attr_map[attr] + ".norm"].values), batch_size)]
-    raw_y = data.loc[:, [(attr_map[attr] + ".norm") for attr in attributes]].values.tolist()
+    # y = [{attr: (data[attr + ".Norm"].values[i:i + batch_size]) for attr in attributes} for i in range(0, len(data[attr + ".Norm"].values), batch_size)]
+    raw_y = data.loc[:, [(attr + ".Norm") for attr in attributes]].values.tolist()
     y = [raw_y[i: i + batch_size] for i in range(0, len(raw_y), batch_size)]
-    # loss_wts = [[data[attr_conf[attr] + ".norm"].values[i:i + batch_size] for attr in attributes] for i in range(0, len(data[attr_conf[attr] + ".norm"].values), batch_size)]
-    raw_wts = data.loc[:, [(attr_conf[attr] + ".norm") for attr in attributes]].values.tolist()
+    # loss_wts = [[data[attr + "Conf.Norm"].values[i:i + batch_size] for attr in attributes] for i in range(0, len(data[attr + "Conf.Norm"].values), batch_size)]
+    raw_wts = data.loc[:, [(attr + "Conf.Norm") for attr in attributes]].values.tolist()
     loss_wts = [raw_wts[i: i + batch_size] for i in range(0, len(raw_wts), batch_size)]
 
     # Create dev data
-    if regressiontype == "linear":
-        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).mean()
-    else:
-        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf)).reset_index(drop=True)
+    data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, type=regressiontype)).reset_index(drop=True)
 
     data_dev_mean['Sentence'] = data_dev_mean['Unique.ID'].map(lambda x: data_dev[data_dev['Unique.ID'] == x]['Sentence'].iloc[0])
 
@@ -267,8 +261,8 @@ def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
     dev_y = {}
     dev_wts = {}
     for attr in attributes:
-        dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
-        dev_wts[attr] = data_dev_mean[attr_conf[attr] + ".norm"].values
+        dev_y[attr] = data_dev_mean[attr + ".Norm"].values
+        dev_wts[attr] = data_dev_mean[attr + ".Norm"].values
 
     # Prepare hand engineered features
     hand_feats, hand_feats_dev = hand_engineering(batch_size=batch_size,
@@ -577,8 +571,7 @@ def r1_score(y_true, y_pred, sample_weight=None, avg='weighted'):
     return r1
 
 
-def print_metrics(attributes, attr_map, attr_conf, wts, y_true, y_pred, fstr,
-                  regression_type, weighted=False):
+def print_metrics(attributes, wts, y_true, y_pred, fstr, regression_type, weighted=False):
     sigdig = 1
     if regression_type == "regression":
         if not weighted:
