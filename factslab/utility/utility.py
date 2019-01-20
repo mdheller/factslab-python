@@ -176,12 +176,12 @@ def dev_mode_group(group, attributes, type):
     mode_row = group.iloc[0]
     for attr in attributes:
         if type == "multinomial":
-            if len(group[attr + ".Norm"].unique()) != 1:
-                mode_row[attr + ".Norm"] = group[attr + ".Norm"].mode()[0]
-                group[group[attr + ".Norm"] != mode_row[attr + ".Norm"]][attr + ".Conf.Norm"] = 1 - group[group[attr + ".Norm"] != mode_row[attr + ".Norm"]][attr + ".Conf.Norm"]
-            mode_row[attr + ".Conf.Norm"] = group[attr + ".Conf.Norm"].mean()
+            if len(group[attr].unique()) != 1:
+                mode_row[attr] = group[attr].mode()[0]
+                group[group[attr] != mode_row[attr]][attr + ".Conf"] = 1 - group[group[attr] != mode_row[attr]][attr + ".Conf"]
+            mode_row[attr + ".Conf.Norm"] = group[attr + ".Conf"].mean()
         else:
-            mode_row[attr + ".Norm"] = group[attr + ".Norm"].mean()
+            mode_row[attr] = group[attr].mean()
     return mode_row
 
 
