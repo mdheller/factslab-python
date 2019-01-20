@@ -208,7 +208,7 @@ if __name__ == "__main__":
         # Load the features
         features = {}
         upos = {}
-        with open(home + '/Desktop/protocols/data/features-2.tsv', 'r') as f:
+        with open(home + '/Research/protocols/data/features-2.tsv', 'r') as f:
             for line in f.readlines():
                 feats = line.split('\t')
                 features[feats[0]] = [feats[1].split(), feats[2].split()]
