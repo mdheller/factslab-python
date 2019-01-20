@@ -157,16 +157,16 @@ def interleave_lists(l1, l2):
     return [item for slist in zip_longest(l1, l2) for item in slist if item is not None]
 
 
-def dev_mode_group(group, attributes, attr_map, attr_conf, type):
+def dev_mode_group(group, attributes, type):
     '''
-        Takes a group from dev data, and returns the (first) mode answer - with mean confidence if all annotations are same, or by changing the conf of non-mode annotations to 1-conf first, then taking the mean of confidences
+        Takes as input a group of rows, and returns a row with the mode value
+        for each attribute if  type is multinomial else mean
 
         Parameters
         ----------
-        group
-        attributes
-        response
-        response_conf
+        group       : group of rows
+        attributes  : attributes in group of rows to change to mean/mode
+        type        : multinomial / regression
 
         Returns
         -------
@@ -176,12 +176,12 @@ def dev_mode_group(group, attributes, attr_map, attr_conf, type):
     mode_row = group.iloc[0]
     for attr in attributes:
         if type == "multinomial":
-            if len(group[attr_map[attr] + ".norm"].unique()) != 1:
-                mode_row[attr_map[attr] + ".norm"] = group[attr_map[attr] + ".norm"].mode()[0]
-                group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"] = 1 - group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"]
-            mode_row[attr_conf[attr] + ".norm"] = group[attr_conf[attr] + ".norm"].mean()
+            if len(group[attr + ".Norm"].unique()) != 1:
+                mode_row[attr + ".Norm"] = group[attr + ".Norm"].mode()[0]
+                group[group[attr + ".Norm"] != mode_row[attr + ".Norm"]][attr + ".Conf.Norm"] = 1 - group[group[attr + ".Norm"] != mode_row[attr + ".Norm"]][attr + ".Conf.Norm"]
+            mode_row[attr + ".Conf.Norm"] = group[attr + ".Conf.Norm"].mean()
         else:
-            mode_row[attr_map[attr] + ".Norm"] = group[attr_map[attr] + ".Norm"].mean()
+            mode_row[attr + ".Norm"] = group[attr + ".Norm"].mean()
     return mode_row
 
 
