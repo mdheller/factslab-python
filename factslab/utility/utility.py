@@ -157,6 +157,14 @@ def interleave_lists(l1, l2):
     return [item for slist in zip_longest(l1, l2) for item in slist if item is not None]
 
 
+def sum_acc(estimator, x_test, y_test):
+    acc = 0
+    y_pred = estimator.predict(x_test)
+    for j in range(3):
+        acc += accuracy(y_test[:, j], y_pred[:, j])
+    return acc
+
+
 def dev_mode_group(group, attributes, type):
     '''
         Takes as input a group of rows, and returns a row with the mode value
@@ -306,9 +314,7 @@ def lcs_score(lcs, lemma):
 
 
 def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, l2f):
-    '''
-        Extract hand engineered features from a word
-    '''
+    '''Extract features from a word'''
     sent = sent_feat[0]
     feats = sent_feat[1][0]
     all_lemmas = sent_feat[1][1]
@@ -321,12 +327,13 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
 
     # UD Lexical features
     for f in all_feats:
-        dict_feats[f] += 1
+        if f in dict_feats.keys():
+            dict_feats[f] = 1
 
     # Lexical item features
     for f in deps_text:
         if f in dict_feats.keys():
-            dict_feats[f] += 1
+            dict_feats[f] = 1
 
     # wordnet supersense of lemma
     for synset in wordnet.synsets(lemma):
@@ -373,7 +380,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
             deps_gov = [x[2].text for x in sent.tokens[token].gov.dependents]
             for f in deps_gov:
                 if f in dict_feats.keys():
-                    dict_feats[f] += 1
+                    dict_feats[f] = 1
 
             # lcs eventiveness
             if gov_lemma in lcs.verbs:
@@ -383,7 +390,13 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
                     dict_feats['lcs_stative'] = 1
 
             for f_lemma in verbnet.classids(lemma=gov_lemma):
-                dict_feats['classid=' + f_lemma] += 1
+                dict_feats['classid=' + f_lemma] = 1
+
+            # framenet name of head
+            pos = sent.tokens[token].gov.tag
+            if gov_lemma + '.' + pos in l2f.keys():
+                frame = l2f[gov_lemma + '.' + pos]
+                dict_feats['frame=' + frame] = 1
 
     return dict_feats
 
