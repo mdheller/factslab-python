@@ -68,12 +68,10 @@ class simpleMLP(Module):
                 return torch.sigmoid(x), hidden
             else:
                 return x, hidden
-                # return x, hidden
         else:
             if not self._continuous:
                 return torch.sigmoid(x)
             else:
-                # return x
                 return x
 
 
@@ -91,7 +89,7 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
         attr_conf = {"part": "Part.Confidence", "dyn": "Dyn.Confidence",
                  "hyp": "Hyp.Confidence"}
 
-    path = '/data/venkat/pickled_data_' + regression_type + '/' + prot
+    path = '/data/venkat/pickled_data_' + regression_type + '2/' + prot
 
     with open(path + 'hand.pkl', 'rb') as fin:
         x_pd, y, dev_x_pd, dev_y, test_x_pd, test_y, data, data_dev_mean, data_test_mean, feature_names = pickle.load(fin)
@@ -153,18 +151,6 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
     except ValueError:
         sys.exit('You need an input representation')
 
-    # import matplotlib
-    # matplotlib.use('agg')
-    # import matplotlib.pyplot as plt
-    # import seaborn as sns
-    # fig, ax = plt.subplots(figsize=[20, 5], nrows=1, ncols=3, squeeze=False, sharey='row')
-    # plt.suptitle(prot)
-    # for i in range(3):
-    #     ax[0][i].set_title(attributes[i])
-    #     sns.distplot(y[attributes[i]], ax=ax[0][i]).get_figure()
-    # plt.savefig(prot + '.png')
-    # sys.exit(0)
-
     device = torch.device('cuda:0')
     grid_params = {'hidden_layer_sizes': [(512, 256), (512, 128), (512, 64), (512, 32), (512,), (256, 128), (256, 64), (256, 32), (256,), (128, 64), (128, 32), (128,), (64, 32), (64,), (32,)], 'alpha': [0, 0.00001, 0.0001, 0.001], 'dropout': [0.1, 0.2, 0.3, 0.4, 0.5], 'activation': ['relu']}
     all_grid_params = list(product(grid_params['hidden_layer_sizes'], grid_params['alpha'], grid_params['dropout'], grid_params['activation']))
@@ -202,10 +188,6 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
             for epoch in range(20):
                 for x_, y_ in zip(x, y):
                     optimizer.zero_grad()
-
-                    # x_ = torch.tensor(x_, dtype=torch.float, device=device)
-                    # y_ = torch.tensor(y_, dtype=torch.float, device=device)
-
                     y_pred = clf(x_)
                     loss = loss_function(y_pred, y_)
                     loss.backward()
@@ -232,7 +214,7 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
                              "_" + str(hidden_state) + "_" +
                              str(alpha) + "_" +
                              str(drp) + "_" + str(act))
-                    Path = "/data/venkat/saved_models/" + regression_type + "/" + name_of_model
+                    Path = "/data/venkat/saved_models/" + regression_type + "2/" + name_of_model
                     torch.save(clf.state_dict(), Path)
         print(min(search_scores, key=lambda x: x[-1]), "\n")
         del x, y, dev_x, test_x
@@ -255,22 +237,20 @@ def main(prot, batch_size, elmo_on, glove_on, typeabl, tokenabl, type_on,
                          str(drp) + "_" + str(act))
         onoff_map = {True: '+', False: '-'}
         abl_state = "& " + " & ".join([onoff_map[xy] for xy in [type_on, token_on, glove_on, elmo_on]])
-        best_model = "/data/venkat/saved_models/" + regression_type + "/" + name_of_model
+        best_model = "/data/venkat/saved_models/" + regression_type + "2/" + name_of_model
         clf.load_state_dict(torch.load(best_model))
         clf.eval()
         if not test_on:
             y_pred_dev, h = predict(clf, dev_x, device)
             # y = np.concatenate(y, axis=0)
             analysis(data_dev_mean, attributes, y_pred_dev, prot, attr_map)
-            print_metrics(attributes=attributes, attr_map=attr_map,
-                          attr_conf=attr_conf, wts=dev_loss_wts,
+            print_metrics(attributes=attributes, wts=dev_loss_wts,
                           y_true=dev_y, y_pred=y_pred_dev, fstr=abl_state,
                           weighted=weighted, regression_type=regression_type)
 #             do_riemann(h, dev_y)
         else:
             y_pred_test, _ = predict(clf, test_x, device)
-            print_metrics(attributes=attributes, attr_map=attr_map,
-                          attr_conf=attr_conf, wts=test_loss_wts,
+            print_metrics(attributes=attributes, wts=test_loss_wts,
                           y_true=test_y, y_pred=y_pred_test, fstr=abl_state,
                           weighted=weighted, regression_type=regression_type)
 
@@ -280,17 +260,21 @@ def analysis(data, attributes, y_pred, prot, attr_map):
         write predictions to file in a nice tsv format for analysis
     '''
     if prot == "arg":
-        columns = ['Unique.ID', 'Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'Is.Particular.Pred', 'Is.Kind.Norm', 'Is.Kind.Pred', 'Is.Abstract.Norm', 'Is.Abstract.Pred']
-        data['Root.Token.New'] = pd.to_numeric(data['Root.Token'])
-        data['Root.Token.New'] += 1         # 1-indexing
-        data['Unique.ID'] = data['Sentence.ID'] + "_" + data['Root.Token.New'].map(lambda x: str(x))
+        columns = ['Unique.ID', 'Sentences', 'Arg.Word', 'Arg.Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'Is.Particular.Pred', 'Is.Kind.Norm', 'Is.Kind.Pred', 'Is.Abstract.Norm', 'Is.Abstract.Pred']
+#         data['Root.Token.New'] = pd.to_numeric(data['Root.Token'])
+#         data['Root.Token.New'] += 1         # 1-indexing
+        data['Unique.ID'] = data['Sentence.ID'] + "_" + data['Arg.Token'].map(lambda x: str(x))
+        data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Arg.Token'] - 1].tag, axis=1)
+        data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Arg.Token'] - 1].gov_rel, axis=1)
     else:
-        columns = ['Unique.ID', 'Sentences', 'Word', 'Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'Is.Particular.Pred', 'Is.Hypothetical.Norm', 'Is.Hypothetical.Pred', 'Is.Dynamic.Norm', 'Is.Dynamic.Pred']
-        data['Span.New'] = data['Span'].apply(lambda x: ",".join([str(int(y) + 1) for y in x.split(',')]))    # 1-indexing
-        data['Unique.ID'] = data['Sentence.ID'] + "_" + data['Span.New']
+        columns = ['Unique.ID', 'Sentences', 'Pred.Word', 'Pred.Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'Is.Particular.Pred', 'Is.Hypothetical.Norm', 'Is.Hypothetical.Pred', 'Is.Dynamic.Norm', 'Is.Dynamic.Pred']
+#         data['Span.New'] = data['Span'].apply(lambda x: ",".join([str(int(y) + 1) for y in x.split(',')]))    # 1-indexing
+        data['Unique.ID'] = data['Sentence.ID'] + "_" + data['Pred.Span']
+        data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Pred.Token'] - 1].tag, axis=1)
+        data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Pred.Token'] - 1].gov_rel, axis=1)
 
-    data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].tag, axis=1)
-    data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].gov_rel, axis=1)
+#     data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].tag, axis=1)
+#     data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].gov_rel, axis=1)
 
     for i, attr in enumerate(attributes):
         data[attr_map[attr] + '.Pred'] = y_pred[:, i]
@@ -305,7 +289,6 @@ def predict(clf, x, device):
     final_h_size = clf._linmaps[-2].weight.shape[0]
     h = np.empty((0, final_h_size), float)
     for x_ in x:
-        # x_ = torch.tensor(x_, dtype=torch.float, device=device)
         y_, h_ = clf(x_, return_hidden=True)
         if not clf._continuous:
             y_ = y_ > 0.5

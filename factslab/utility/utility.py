@@ -3,7 +3,6 @@ from os.path import expanduser
 import numpy as np
 import pandas as pd
 from zipfile import ZipFile
-from torch import from_numpy, sort
 from sklearn.utils import shuffle
 from itertools import zip_longest
 from nltk.corpus import wordnet, framenet, verbnet
@@ -14,7 +13,14 @@ from allennlp.commands.elmo import ElmoEmbedder
 import torch
 from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1, mean_absolute_error as mae, r2_score as r2
 from scipy.stats import spearmanr, pearsonr, mode
+import random
 
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+random.seed(1)
+np.random.seed(1)
+torch.manual_seed(1)
+torch.cuda.manual_seed(1)
 
 def load_glove_embedding(fpath, vocab, prot=''):
     """load glove embedding
@@ -93,8 +99,8 @@ def arrange_inputs(data_batch, targets_batch, wts_batch, tokens_batch, attribute
             sorted_wts_batch[attr] = []
 
         for data, tokens in zip(data_batch, tokens_batch):
-            seq_len = from_numpy(np.array([len(x) for x in data]))
-            sorted_seq_len, sorted_idx = sort(seq_len, descending=True)
+            seq_len = torch.from_numpy(np.array([len(x) for x in data]))
+            sorted_seq_len, sorted_idx = torch.sort(seq_len, descending=True)
             # max_len = sorted_seq_len[0]
             sorted_seq_len_batch.append(np.array(sorted_seq_len))
             sorted_data = [data[x] for x in sorted_idx]
@@ -157,16 +163,24 @@ def interleave_lists(l1, l2):
     return [item for slist in zip_longest(l1, l2) for item in slist if item is not None]
 
 
-def dev_mode_group(group, attributes, attr_map, attr_conf, type):
+def sum_acc(estimator, x_test, y_test):
+    acc = 0
+    y_pred = estimator.predict(x_test)
+    for j in range(3):
+        acc += accuracy(y_test[:, j], y_pred[:, j])
+    return acc
+
+
+def dev_mode_group(group, attributes, type):
     '''
-        Takes a group from dev data, and returns the (first) mode answer - with mean confidence if all annotations are same, or by changing the conf of non-mode annotations to 1-conf first, then taking the mean of confidences
+        Takes as input a group of rows, and returns a row with the mode value
+        for each attribute if  type is multinomial else mean
 
         Parameters
         ----------
-        group
-        attributes
-        response
-        response_conf
+        group       : group of rows
+        attributes  : attributes in group of rows to change to mean/mode
+        type        : multinomial / regression
 
         Returns
         -------
@@ -176,17 +190,16 @@ def dev_mode_group(group, attributes, attr_map, attr_conf, type):
     mode_row = group.iloc[0]
     for attr in attributes:
         if type == "multinomial":
-            if len(group[attr_map[attr] + ".norm"].unique()) != 1:
-                mode_row[attr_map[attr] + ".norm"] = group[attr_map[attr] + ".norm"].mode()[0]
-                group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"] = 1 - group[group[attr_map[attr] + ".norm"] != mode_row[attr_map[attr] + ".norm"]][attr_conf[attr] + ".norm"]
-            mode_row[attr_conf[attr] + ".norm"] = group[attr_conf[attr] + ".norm"].mean()
+            if len(group[attr].unique()) != 1:
+                mode_row[attr] = group[attr].mode()[0]
+                group[group[attr] != mode_row[attr]][attr + ".Conf"] = 1 - group[group[attr] != mode_row[attr]][attr + ".Conf"]
+            mode_row[attr + ".Conf.Norm"] = group[attr + ".Conf"].mean()
         else:
-            mode_row[attr_map[attr] + ".Norm"] = group[attr_map[attr] + ".Norm"].mean()
+            mode_row[attr] = group[attr].mean()
     return mode_row
 
 
-def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
-              sentences, batch_size):
+def read_data(prot, datafile, attributes, regressiontype, sentences, batch_size):
     '''
         Reads datafiles, and create minibatched(if desired) lists
         of x, y, tokens, spans, context_roots, context_spans, loss_wts
@@ -212,16 +225,14 @@ def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
 
     # Ridit scoring annotations and confidence ratings
     for attr in attributes:
-        resp = attr_map[attr]
-        resp_conf = attr_conf[attr]
-        data[resp_conf + ".norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
-        data_dev[resp_conf + ".norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
+        data[attr + ".Norm"] = data.groupby('Annotator.ID')[resp_conf].transform(ridit)
+        data_dev[attr + ".Conf.Norm"] = data_dev.groupby('Annotator.ID')[resp_conf].transform(ridit)
         if regressiontype == "multinomial":
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else 0)
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else 0)
+            data[attr + ".Norm"] = data[attr].map(lambda x: 1 if x else 0)
+            data_dev[attr + ".Norm"] = data_dev[attr].map(lambda x: 1 if x else 0)
         elif regressiontype == "linear":
-            data[resp + ".norm"] = data[resp].map(lambda x: 1 if x else -1) * data[resp_conf + ".norm"]
-            data_dev[resp + ".norm"] = data_dev[resp].map(lambda x: 1 if x else -1) * data_dev[resp_conf + ".norm"]
+            data[attr + ".Norm"] = data[attr].map(lambda x: 1 if x else -1) * data[attr + ".Conf.Norm"]
+            data_dev[attr + ".Norm"] = data_dev[resp].map(lambda x: 1 if x else -1) * data_dev[resp_conf + ".Conf.Norm"]
 
     # Shuffle the data
     data = shuffle(data).reset_index(drop=True)
@@ -240,18 +251,15 @@ def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
     # Form tuples from the contexts
     spans = [[datum[:] for datum in data['Span'].values.tolist()][i:i + batch_size] for i in range(0, len(data["Span"]), batch_size)]
 
-    # y = [{attr: (data[attr_map[attr] + ".norm"].values[i:i + batch_size]) for attr in attributes} for i in range(0, len(data[attr_map[attr] + ".norm"].values), batch_size)]
-    raw_y = data.loc[:, [(attr_map[attr] + ".norm") for attr in attributes]].values.tolist()
+    # y = [{attr: (data[attr + ".Norm"].values[i:i + batch_size]) for attr in attributes} for i in range(0, len(data[attr + ".Norm"].values), batch_size)]
+    raw_y = data.loc[:, [(attr + ".Norm") for attr in attributes]].values.tolist()
     y = [raw_y[i: i + batch_size] for i in range(0, len(raw_y), batch_size)]
-    # loss_wts = [[data[attr_conf[attr] + ".norm"].values[i:i + batch_size] for attr in attributes] for i in range(0, len(data[attr_conf[attr] + ".norm"].values), batch_size)]
-    raw_wts = data.loc[:, [(attr_conf[attr] + ".norm") for attr in attributes]].values.tolist()
+    # loss_wts = [[data[attr + "Conf.Norm"].values[i:i + batch_size] for attr in attributes] for i in range(0, len(data[attr + "Conf.Norm"].values), batch_size)]
+    raw_wts = data.loc[:, [(attr + "Conf.Norm") for attr in attributes]].values.tolist()
     loss_wts = [raw_wts[i: i + batch_size] for i in range(0, len(raw_wts), batch_size)]
 
     # Create dev data
-    if regressiontype == "linear":
-        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).mean()
-    else:
-        data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, attr_map, attr_conf)).reset_index(drop=True)
+    data_dev_mean = data_dev.groupby('Unique.ID', as_index=False).apply(lambda x: dev_mode_group(x, attributes, type=regressiontype)).reset_index(drop=True)
 
     data_dev_mean['Sentence'] = data_dev_mean['Unique.ID'].map(lambda x: data_dev[data_dev['Unique.ID'] == x]['Sentence'].iloc[0])
 
@@ -268,8 +276,8 @@ def read_data(prot, datafile, attributes, attr_map, attr_conf, regressiontype,
     dev_y = {}
     dev_wts = {}
     for attr in attributes:
-        dev_y[attr] = data_dev_mean[attr_map[attr] + ".norm"].values
-        dev_wts[attr] = data_dev_mean[attr_conf[attr] + ".norm"].values
+        dev_y[attr] = data_dev_mean[attr + ".Norm"].values
+        dev_wts[attr] = data_dev_mean[attr + ".Norm"].values
 
     # Prepare hand engineered features
     hand_feats, hand_feats_dev = hand_engineering(batch_size=batch_size,
@@ -312,9 +320,7 @@ def lcs_score(lcs, lemma):
 
 
 def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, l2f):
-    '''
-        Extract hand engineered features from a word
-    '''
+    '''Extract features from a word'''
     sent = sent_feat[0]
     feats = sent_feat[1][0]
     all_lemmas = sent_feat[1][1]
@@ -327,12 +333,13 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
 
     # UD Lexical features
     for f in all_feats:
-        dict_feats[f] += 1
+        if f in dict_feats.keys():
+            dict_feats[f] = 1
 
     # Lexical item features
     for f in deps_text:
         if f in dict_feats.keys():
-            dict_feats[f] += 1
+            dict_feats[f] = 1
 
     # wordnet supersense of lemma
     for synset in wordnet.synsets(lemma):
@@ -379,7 +386,7 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
             deps_gov = [x[2].text for x in sent.tokens[token].gov.dependents]
             for f in deps_gov:
                 if f in dict_feats.keys():
-                    dict_feats[f] += 1
+                    dict_feats[f] = 1
 
             # lcs eventiveness
             if gov_lemma in lcs.verbs:
@@ -389,7 +396,13 @@ def features_func(sent_feat, token, lemma, dict_feats, prot, concreteness, lcs, 
                     dict_feats['lcs_stative'] = 1
 
             for f_lemma in verbnet.classids(lemma=gov_lemma):
-                dict_feats['classid=' + f_lemma] += 1
+                dict_feats['classid=' + f_lemma] = 1
+
+            # framenet name of head
+            pos = sent.tokens[token].gov.tag
+            if gov_lemma + '.' + pos in l2f.keys():
+                frame = l2f[gov_lemma + '.' + pos]
+                dict_feats['frame=' + frame] = 1
 
     return dict_feats
 
@@ -555,15 +568,15 @@ def r1_score(y_true, y_pred, sample_weight=None, avg='weighted'):
     '''
 
     if len(y_true.shape) == 1:
-        baseline_mae = mae(y_true, [np.mean(y_true, axis=0) for i in range(len(y_true))], sample_weight=sample_weight)
+        baseline_mae = mae(y_true, [np.median(y_true, axis=0) for i in range(len(y_true))], sample_weight=sample_weight)
         model_mae = mae(y_true, y_pred, sample_weight=sample_weight)
         r1 = 1 - (model_mae / baseline_mae)
     else:
         if not sample_weight:
-            baseline_mae = [mae(y_true[:, ij], [np.mean(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=None) for ij in range(3)]
+            baseline_mae = [mae(y_true[:, ij], [np.median(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=None) for ij in range(3)]
             model_mae = [mae(y_true[:, ij], y_pred[:, ij], sample_weight=None) for ij in range(3)]
         else:
-            baseline_mae = [mae(y_true[:, ij], [np.mean(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=sample_weight[:, ij]) for ij in range(3)]
+            baseline_mae = [mae(y_true[:, ij], [np.median(y_true[:, ij], axis=0) for i in range(len(y_true))], sample_weight=sample_weight[:, ij]) for ij in range(3)]
             model_mae = [mae(y_true[:, ij], y_pred[:, ij], sample_weight=sample_weight[:, ij]) for ij in range(3)]
 
         r1 = 0
@@ -578,12 +591,11 @@ def r1_score(y_true, y_pred, sample_weight=None, avg='weighted'):
     return r1
 
 
-def print_metrics(attributes, attr_map, attr_conf, wts, y_true, y_pred, fstr,
-                  regression_type, weighted=False):
+def print_metrics(attributes, wts, y_true, y_pred, fstr, regression_type, weighted=False):
     sigdig = 1
     if regression_type == "regression":
         if not weighted:
-            print(mae(y_true, y_pred))
+#             print(mae(y_true, y_pred))
             print(fstr, '&', np.round(pearsonr(y_true[:, 0], y_pred[:, 0])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 0], y_pred[:, 0]) * 100, sigdig), '&', np.round(pearsonr(y_true[:, 1], y_pred[:, 1])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 1], y_pred[:, 1]) * 100, sigdig), '&', np.round(pearsonr(y_true[:, 2], y_pred[:, 2])[0] * 100, sigdig), '&', np.round(r1_score(y_true[:, 2], y_pred[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred) * 100, sigdig), "\\\\")
         else:
             print(fstr, '&', np.round(spearmanr(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 0], y_pred[:, 0], sample_weight=wts[:, 0]) * 100, sigdig), '&', np.round(spearmanr(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 1], y_pred[:, 1], sample_weight=wts[:, 1]) * 100, sigdig), '&', np.round(spearmanr(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true[:, 2], y_pred[:, 2], sample_weight=wts[:, 2]) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred, sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), '&', np.round(r1_score(y_true, y_pred, multioutput="variance_weighted", sample_weight=np.sum(wts, axis=1) / 3) * 100, sigdig), "\\\\")
