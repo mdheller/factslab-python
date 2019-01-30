@@ -13,7 +13,14 @@ from allennlp.commands.elmo import ElmoEmbedder
 import torch
 from sklearn.metrics import accuracy_score as accuracy, precision_score as precision, recall_score as recall, f1_score as f1, mean_absolute_error as mae, r2_score as r2
 from scipy.stats import spearmanr, pearsonr, mode
+import random
 
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+random.seed(1)
+np.random.seed(1)
+torch.manual_seed(1)
+torch.cuda.manual_seed(1)
 
 def load_glove_embedding(fpath, vocab, prot=''):
     """load glove embedding
