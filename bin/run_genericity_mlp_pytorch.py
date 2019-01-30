@@ -270,8 +270,8 @@ def analysis(data, attributes, y_pred, prot, attr_map):
         columns = ['Unique.ID', 'Sentences', 'Pred.Word', 'Pred.Lemma', 'POS', 'DEPREL', 'Is.Particular.Norm', 'Is.Particular.Pred', 'Is.Hypothetical.Norm', 'Is.Hypothetical.Pred', 'Is.Dynamic.Norm', 'Is.Dynamic.Pred']
 #         data['Span.New'] = data['Span'].apply(lambda x: ",".join([str(int(y) + 1) for y in x.split(',')]))    # 1-indexing
         data['Unique.ID'] = data['Sentence.ID'] + "_" + data['Pred.Span']
-        data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Arg.Token'] - 1].tag, axis=1)
-        data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Arg.Token'] - 1].gov_rel, axis=1)
+        data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Pred.Token'] - 1].tag, axis=1)
+        data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Pred.Token'] - 1].gov_rel, axis=1)
 
 #     data['POS'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].tag, axis=1)
 #     data['DEPREL'] = data.apply(lambda x: x['Structure'][0].tokens[x['Root.Token']].gov_rel, axis=1)
