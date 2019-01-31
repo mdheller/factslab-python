@@ -81,6 +81,7 @@ class TemporalModel(torch.nn.Module):
                 fine_squash = True,
                 baseline=False,
                 attention=True, event_attention='root', dur_attention = 'param', 
+                connect_duration = False,
                 rel_attention = 'param', dur_MLP_sizes = [24], fine_MLP_sizes = [24],
                 dur_output_size = 11, fine_output_size = 4,
                 device=torch.device(type="cpu") ):
@@ -99,6 +100,7 @@ class TemporalModel(torch.nn.Module):
         self.elmo_class = elmo_class
         self.fine_squash = fine_squash ## boolean for whether to squash fine-grained values
         self.baseline = baseline
+        self.connect_duration = connect_duration
 
         #initialize embedding-tuning MLP
         self.tuned_embed_MLP = nn.Linear(self.embedding_size*3, self.tuned_embed_size)
@@ -179,7 +181,7 @@ class TemporalModel(torch.nn.Module):
         elif param=="coarse2" or param=="coarser2":
             input_size=input_size
 
-        else:
+        else: #fine MLP
             if self.event_attention == "root" and self.rel_attention == "root":
                 input_size = input_size*2
             elif self.event_attention == "root" and self.rel_attention != "root":
@@ -188,6 +190,10 @@ class TemporalModel(torch.nn.Module):
                 input_size = input_size*4
             elif self.event_attention != "root" and self.rel_attention != "root":
                 input_size = input_size*5
+
+            if self.connect_duration and self.duration_distr:
+                input_size += 2*self.dur_output_size      ##later concatenate pred1 and pred2 duration
+
 
         for h in hidden_sizes:
             linmap = torch.nn.Linear(input_size, h)
@@ -243,13 +249,21 @@ class TemporalModel(torch.nn.Module):
             pred1_dur = self._run_duration_attention(inputs, pred1_out)
             pred2_dur = self._run_duration_attention(inputs, pred2_out)
 
-        ##Run through relative_temporal type:
-        rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
-
         ##Run Duration-MLP
         pred1_dur = self._run_regression(pred1_dur, param="duration", activation=self.mlp_activation)
         pred2_dur = self._run_regression(pred2_dur, param="duration", activation=self.mlp_activation)
 
+        if self.duration_distr:
+            pred1_dur = self._binomial_dist(pred1_dur)
+            pred2_dur = self._binomial_dist(pred2_dur)
+
+
+        ##Run through relative_temporal type:
+        rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
+
+        if self.connect_duration and self.duration_distr:
+            rel_output = torch.cat([rel_output, pred1_dur, pred2_dur], dim=1)
+            
         #Run Fine-grained-MLP
         fine_output_raw = self._run_regression(rel_output, param="fine", activation=self.mlp_activation)
     
@@ -283,9 +297,6 @@ class TemporalModel(torch.nn.Module):
         # ##Run Coarser-grained MLP
         # coarser_output2 = self._run_regression(fine_output_mod, param="coarser2", activation=self.mlp_activation)
 
-        if self.duration_distr:
-            pred1_dur = self._binomial_dist(pred1_dur)
-            pred2_dur = self._binomial_dist(pred2_dur)
 
         #y_hat = (pred1_dur, pred2_dur, fine_output, coarse_output, coarser_output)
         y_hat = (pred1_dur, pred2_dur, fine_output_norm, rel_output)
@@ -614,6 +625,7 @@ class TemporalTrainer(object):
                                 "_" + str(int(class_wt)) + \
                                 "_" + "-".join([str(x) for x in kwargs['dur_MLP_sizes']]) + \
                                 "_" + "-".join([str(x) for x in kwargs['fine_MLP_sizes']]) + \
+                                "_" + str(int(kwargs['connect_duration'])) +\
                                 "_" + str(optim_wt_decay) + \
                                 "_" + str(kwargs['mlp_dropout']) + "_" + kwargs['mlp_activation'] + \
                                 "_" + str(int(kwargs['duration_distr'])) +\
@@ -863,7 +875,7 @@ class TemporalTrainer(object):
             tqdm.write("Running Epoch: {}".format(epoch+1))
             
             #time print
-            pbar = tqdm(total = total_obs//self.train_batch_size)
+            pbar = tqdm_n(total = total_obs//self.train_batch_size)
             
             while bidx_j < total_obs:
                 words = [p for p,q,r in self._X[bidx_i:bidx_j]]
