@@ -85,8 +85,8 @@ def fit_glmem_normalizer(X, annid, uniqueid, weights, seed, loss="binomial", ite
 
 if __name__ == __main__:
 
-    data_arg = pd.read_csv('arg_raw_data.tsv', sep="\t").dropna()
-    data_prd = pd.read_csv('pred_raw_data.tsv', sep="\t").dropna()
+    data_arg = pd.read_csv('arg_long_data.tsv', sep="\t").dropna()
+    data_prd = pd.read_csv('pred_long_data.tsv', sep="\t").dropna()
 
     data_arg['Unique.ID'] = data_arg.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x["Arg.Span"]), axis=1)
     data_prd['Unique.ID'] = data_prd.apply(lambda x: x['Split'] + " sent_" + str(x['Sentence.ID']) + "_" + str(x["Pred.Span"]), axis=1)
@@ -237,5 +237,5 @@ if __name__ == __main__:
     data_arg_norm_thresh = pd.merge(data_arg_norm, np.minimum(1, np.maximum(-1, norm_arg.rename(columns={'Is.Particular.Norm': 'Is.Particular.Norm.Thresholded', left_on='Unique.ID', right_index=True)
     data_prd_norm_thresh = pd.merge(data_prd_norm, np.minimum(1, np.maximum(-1, norm_prd.rename(columns={'Is.Particular.Norm': 'Is.Particular.Norm.Thresholded', left_on='Unique.ID', right_index=True)
 
-    data_arg_norm_thresh.to_csv('noun_raw_data_norm_011919.tsv', sep='\t', index=False)
-    data_prd_norm_thresh.to_csv('pred_raw_data_norm_011919.tsv', sep='\t', index=False)
+    data_arg_norm_thresh.to_csv('noun_raw_data_norm.tsv', sep='\t', index=False)
+    data_prd_norm_thresh.to_csv('pred_raw_data_norm.tsv', sep='\t', index=False)
