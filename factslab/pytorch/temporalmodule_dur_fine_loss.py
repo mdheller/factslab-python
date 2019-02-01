@@ -82,6 +82,8 @@ class TemporalModel(torch.nn.Module):
                 baseline=False,
                 attention=True, event_attention='root', dur_attention = 'param', 
                 connect_duration = False,
+                fine_to_dur = False,
+                dur_to_fine = False,
                 rel_attention = 'param', dur_MLP_sizes = [24], fine_MLP_sizes = [24],
                 dur_output_size = 11, fine_output_size = 4,
                 device=torch.device(type="cpu") ):
@@ -101,6 +103,8 @@ class TemporalModel(torch.nn.Module):
         self.fine_squash = fine_squash ## boolean for whether to squash fine-grained values
         self.baseline = baseline
         self.connect_duration = connect_duration
+        self.fine_to_dur = fine_to_dur
+        self.dur_to_fine = dur_to_fine
 
         #initialize embedding-tuning MLP
         self.tuned_embed_MLP = nn.Linear(self.embedding_size*3, self.tuned_embed_size)
@@ -111,12 +115,17 @@ class TemporalModel(torch.nn.Module):
         # initialize MLP layers
         self.linear_maps = nn.ModuleDict()
 
-        if self.duration_distr:
-            self._init_MLP(tune_embed_size,dur_MLP_sizes,1, param="duration")
-        else:
-            self._init_MLP(tune_embed_size,dur_MLP_sizes,dur_output_size, param="duration")
+        if not self.fine_to_dur:
+            if self.duration_distr:
+                self._init_MLP(tune_embed_size,dur_MLP_sizes,1, param="duration")
+            else:
+                self._init_MLP(tune_embed_size,dur_MLP_sizes,dur_output_size, param="duration")
 
-        self._init_MLP(tune_embed_size, fine_MLP_sizes, fine_output_size, param="fine")
+        if not self.dur_to_fine:
+            self._init_MLP(tune_embed_size, fine_MLP_sizes, fine_output_size, param="fine")
+        else:
+            self._init_MLP(self.dur_output_size*2, fine_MLP_sizes, fine_output_size, param="fine")
+
         #self._init_MLP(tune_embed_size, coarse_MLP_sizes,coarse_output_size, param="coarse")
         #self._init_MLP(tune_embed_size, coarser_MLP_sizes, coarser_output_size, param="coarser")
         
@@ -182,17 +191,18 @@ class TemporalModel(torch.nn.Module):
             input_size=input_size
 
         else: #fine MLP
-            if self.event_attention == "root" and self.rel_attention == "root":
-                input_size = input_size*2
-            elif self.event_attention == "root" and self.rel_attention != "root":
-                input_size = input_size*3
-            elif self.event_attention != "root" and self.rel_attention == "root":
-                input_size = input_size*4
-            elif self.event_attention != "root" and self.rel_attention != "root":
-                input_size = input_size*5
+            if not self.dur_to_fine:
+                if self.event_attention == "root" and self.rel_attention == "root":
+                    input_size = input_size*2
+                elif self.event_attention == "root" and self.rel_attention != "root":
+                    input_size = input_size*3
+                elif self.event_attention != "root" and self.rel_attention == "root":
+                    input_size = input_size*4
+                elif self.event_attention != "root" and self.rel_attention != "root":
+                    input_size = input_size*5
 
-            if self.connect_duration and self.duration_distr:
-                input_size += 2*self.dur_output_size      ##later concatenate pred1 and pred2 duration
+                if self.connect_duration and self.duration_distr:
+                    input_size += 2*self.dur_output_size      ##concatenate pred1 and pred2 duration with g_rel
 
 
         for h in hidden_sizes:
@@ -242,34 +252,37 @@ class TemporalModel(torch.nn.Module):
         pred2_out = self._run_event_attention(inputs, pred2_spans, pred2_r_idxs)
             
         #Run duration attention on outputs from event attention
-        if dur_attention_wts:
-            pred1_dur, pred1_dur_att_wts, pred1_dur_att_wts_raw = self._run_duration_attention(inputs, pred1_out, attention_wts=True)
-            pred2_dur, pred2_dur_att_wts, pred2_dur_att_wts_raw = self._run_duration_attention(inputs, pred2_out, attention_wts=True)
-        else:
-            pred1_dur = self._run_duration_attention(inputs, pred1_out)
-            pred2_dur = self._run_duration_attention(inputs, pred2_out)
+        if not self.fine_to_dur:
+            if dur_attention_wts:
+                pred1_dur, pred1_dur_att_wts, pred1_dur_att_wts_raw = self._run_duration_attention(inputs, pred1_out, attention_wts=True)
+                pred2_dur, pred2_dur_att_wts, pred2_dur_att_wts_raw = self._run_duration_attention(inputs, pred2_out, attention_wts=True)
+            else:
+                pred1_dur = self._run_duration_attention(inputs, pred1_out)
+                pred2_dur = self._run_duration_attention(inputs, pred2_out)
 
-        ##Run Duration-MLP
-        pred1_dur = self._run_regression(pred1_dur, param="duration", activation=self.mlp_activation)
-        pred2_dur = self._run_regression(pred2_dur, param="duration", activation=self.mlp_activation)
+            ##Run Duration-MLP
+            pred1_dur = self._run_regression(pred1_dur, param="duration", activation=self.mlp_activation)
+            pred2_dur = self._run_regression(pred2_dur, param="duration", activation=self.mlp_activation)
 
-        if self.duration_distr:
-            pred1_dur = self._binomial_dist(pred1_dur)
-            pred2_dur = self._binomial_dist(pred2_dur)
-
+            if self.duration_distr:
+                pred1_dur = self._binomial_dist(pred1_dur)
+                pred2_dur = self._binomial_dist(pred2_dur)
 
         ##Run through relative_temporal type:
-        rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
+        if not self.dur_to_fine:
+            rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
+        else:
+            rel_output = torch.cat([pred1_dur, pred2_dur], dim=1)
 
-        if self.connect_duration and self.duration_distr:
+        if self.connect_duration and self.duration_distr and not self.fine_to_dur:
             rel_output = torch.cat([rel_output, pred1_dur, pred2_dur], dim=1)
             
         #Run Fine-grained-MLP
+        #print("Rel output shape: {}".format(rel_output.shape))
         fine_output_raw = self._run_regression(rel_output, param="fine", activation=self.mlp_activation)
     
         if self.fine_squash:
             fine_output = self._squash_finegrained(fine_output_raw)
-            
         else:
             fine_output = fine_output_raw.clone().to(self.device)
             ###Make durations  positive:
@@ -277,6 +290,12 @@ class TemporalModel(torch.nn.Module):
             fine_output[:,3] = torch.abs(fine_output[:,3].clone().to(self.device))
 
         fine_output_norm = self._normalize_finegrained(fine_output)
+
+        
+        if self.fine_to_dur:
+            pred1_dur = self._binomial_dist(fine_output_norm[:,1])
+            pred2_dur = self._binomial_dist(fine_output_norm[:,3])
+
 
         if self.baseline:
             fine_output_norm = torch.from_numpy(np.array([[0.0, 0.75, 0.1875, 1.0]])).repeat(fine_output.size()[0],1).float().to(self.device)
@@ -626,6 +645,8 @@ class TemporalTrainer(object):
                                 "_" + "-".join([str(x) for x in kwargs['dur_MLP_sizes']]) + \
                                 "_" + "-".join([str(x) for x in kwargs['fine_MLP_sizes']]) + \
                                 "_" + str(int(kwargs['connect_duration'])) +\
+                                "_" + str(int(kwargs['fine_to_dur'])) +\
+                                "_" + str(int(kwargs['dur_to_fine'])) +\
                                 "_" + str(optim_wt_decay) + \
                                 "_" + str(kwargs['mlp_dropout']) + "_" + kwargs['mlp_activation'] + \
                                 "_" + str(int(kwargs['duration_distr'])) +\
