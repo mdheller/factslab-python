@@ -82,6 +82,8 @@ class TemporalModel(torch.nn.Module):
                 baseline=False,
                 attention=True, event_attention='root', dur_attention = 'param', 
                 connect_duration = False,
+                concat_dur_to_fine = False,
+                concat_fine_to_dur = False, 
                 fine_to_dur = False,
                 dur_to_fine = False,
                 rel_attention = 'param', dur_MLP_sizes = [24], fine_MLP_sizes = [24],
@@ -102,9 +104,10 @@ class TemporalModel(torch.nn.Module):
         self.elmo_class = elmo_class
         self.fine_squash = fine_squash ## boolean for whether to squash fine-grained values
         self.baseline = baseline
-        self.connect_duration = connect_duration
+        self.connect_duration = connect_duration #it is equivalent to concat_dur_to_fine
         self.fine_to_dur = fine_to_dur
         self.dur_to_fine = dur_to_fine
+        self.concat_fine_to_dur = concat_fine_to_dur
 
         #initialize embedding-tuning MLP
         self.tuned_embed_MLP = nn.Linear(self.embedding_size*3, self.tuned_embed_size)
@@ -215,7 +218,10 @@ class TemporalModel(torch.nn.Module):
         linmap = linmap.to(self.device)
         self.linear_maps[param].append(linmap)
 
-    def forward(self, structures, spans_idxs, root_idxs, dur_attention_wts=False):
+    def forward(self, structures, spans_idxs, root_idxs, 
+                        dur_attention_wts=False,
+                        event_attention_wts = False,
+                        relation_attention_wts = False):
         '''
         Input: 1. structures: A list of list of words
                2. idxs: A list of list of span indexes 
@@ -248,8 +254,12 @@ class TemporalModel(torch.nn.Module):
         pred2_spans = [y for x,y in spans_idxs]
 
         #Run Event attention on inputs based on attention type:
-        pred1_out = self._run_event_attention(inputs, pred1_spans, pred1_r_idxs)
-        pred2_out = self._run_event_attention(inputs, pred2_spans, pred2_r_idxs)
+        if event_attention_wts:
+            pred1_out, pred1_event_att_wts, pred1_event_att_wts_raw = self._run_event_attention(inputs, pred1_spans, pred1_r_idxs, attention_wts=True)
+            pred2_out, pred2_event_att_wts, pred2_event_att_wts_raw = self._run_event_attention(inputs, pred2_spans, pred2_r_idxs, attention_wts=True)
+        else:
+            pred1_out = self._run_event_attention(inputs, pred1_spans, pred1_r_idxs)
+            pred2_out = self._run_event_attention(inputs, pred2_spans, pred2_r_idxs)
             
         #Run duration attention on outputs from event attention
         if not self.fine_to_dur:
@@ -260,6 +270,12 @@ class TemporalModel(torch.nn.Module):
                 pred1_dur = self._run_duration_attention(inputs, pred1_out)
                 pred2_dur = self._run_duration_attention(inputs, pred2_out)
 
+            # if self.concat_fine_to_dur:
+            #     pred1_dur = torch.cat([pred1_dur, fine_output_norm[:,1]], dim=1)
+            #     pred2_dur = torch.cat([pred1_dur, fine_output_norm[:,3]], dim=1)
+            #     print(pred1_dur.shape)
+            #     print(pred2_dur.shape)
+
             ##Run Duration-MLP
             pred1_dur = self._run_regression(pred1_dur, param="duration", activation=self.mlp_activation)
             pred2_dur = self._run_regression(pred2_dur, param="duration", activation=self.mlp_activation)
@@ -269,10 +285,13 @@ class TemporalModel(torch.nn.Module):
                 pred2_dur = self._binomial_dist(pred2_dur)
 
         ##Run through relative_temporal type:
-        if not self.dur_to_fine:
-            rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
-        else:
+        if self.dur_to_fine:
             rel_output = torch.cat([pred1_dur, pred2_dur], dim=1)
+        else:
+            if relation_attention_wts:
+                rel_output, rel_att_wts, rel_att_wts_raw = self._run_relation_attention(inputs, pred1_out, pred2_out, attention_wts=True)
+            else:
+                rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
 
         if self.connect_duration and self.duration_distr and not self.fine_to_dur:
             rel_output = torch.cat([rel_output, pred1_dur, pred2_dur], dim=1)
@@ -291,11 +310,9 @@ class TemporalModel(torch.nn.Module):
 
         fine_output_norm = self._normalize_finegrained(fine_output)
 
-        
         if self.fine_to_dur:
             pred1_dur = self._binomial_dist(fine_output_norm[:,1])
             pred2_dur = self._binomial_dist(fine_output_norm[:,3])
-
 
         if self.baseline:
             fine_output_norm = torch.from_numpy(np.array([[0.0, 0.75, 0.1875, 1.0]])).repeat(fine_output.size()[0],1).float().to(self.device)
@@ -323,6 +340,10 @@ class TemporalModel(torch.nn.Module):
         
         if dur_attention_wts:
             return pred1_dur_att_wts, pred2_dur_att_wts, pred1_dur_att_wts_raw, pred2_dur_att_wts_raw
+        elif event_attention_wts:
+            return  pred1_dur_att_wts, pred2_event_att_wts, pred1_dur_att_wts_raw, pred2_event_att_wts_raw
+        elif relation_attention_wts:
+            return rel_att_wts, rel_att_wts_raw
         else:
             return y_hat
 
@@ -449,7 +470,7 @@ class TemporalModel(torch.nn.Module):
                 
         return span_embeds
 
-    def _run_event_attention(self, inputs, pred1_spans, pred1_r_idxs):
+    def _run_event_attention(self, inputs, pred1_spans, pred1_r_idxs, attention_wts=False):
         '''
         Input: An input tensor with dimension:
              (batch_size x max_sentence_len x embedding_size)
@@ -475,8 +496,10 @@ class TemporalModel(torch.nn.Module):
             att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, pred1_span_inputs.shape[1]), dim=1)
             pred1_context = torch.bmm(att[:, None, :], pred1_span_inputs).squeeze()
-           
-            return torch.cat((pred1_root, pred1_context), dim=1)
+            if attention_wts:
+                return torch.cat((pred1_root, pred1_context), dim=1), att, att_raw
+            else:
+                return torch.cat((pred1_root, pred1_context), dim=1)
 
         elif self.event_attention == "param":
             pred1_span_inputs = self._extract_span_inputs(inputs, pred1_spans)
@@ -486,8 +509,12 @@ class TemporalModel(torch.nn.Module):
             att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, pred1_span_inputs.shape[1]), dim=1)
             pred1_context = torch.bmm(att[:, None, :], pred1_span_inputs).squeeze()
-           
-            return torch.cat((pred1_root, pred1_context), dim=1)
+            
+            if attention_wts:
+                return torch.cat((pred1_root, pred1_context), dim=1), att, att_raw
+            else:
+                return torch.cat((pred1_root, pred1_context), dim=1)
+
 
     def _run_duration_attention(self, inputs, pred_in, attention_wts=False):
         '''
@@ -528,7 +555,7 @@ class TemporalModel(torch.nn.Module):
                 return torch.cat((pred_in, dur_context), dim=1)
 
 
-    def _run_relation_attention(self, inputs, pred1_in, pred2_in):
+    def _run_relation_attention(self, inputs, pred1_in, pred2_in, attention_wts=False):
         '''
         Inputs:
         1. inputs: Embeddings of the whole sentence
@@ -548,8 +575,10 @@ class TemporalModel(torch.nn.Module):
             att_raw = att_raw.masked_fill(att_raw[:, :, 0:1] == 0, -float('inf'))
             att = F.softmax(att_raw.view(batch_size, inputs.shape[1]), dim=1)
             rel_context = torch.bmm(att[:, None, :], inputs).squeeze()
-
-            return torch.cat((pred1_in, pred2_in, rel_context), dim=1)
+            if attention_wts:
+                return torch.cat((pred1_in, pred2_in, rel_context), dim=1), att, att_raw
+            else:
+                return torch.cat((pred1_in, pred2_in, rel_context), dim=1)
 
         elif self.rel_attention == "param":
             att_span = self.rel_att_map(torch.cat((pred1_in, pred2_in), dim=1))
@@ -559,7 +588,10 @@ class TemporalModel(torch.nn.Module):
             att = F.softmax(att_raw.view(batch_size, inputs.shape[1]), dim=1)
             rel_context = torch.bmm(att[:, None, :], inputs).squeeze()
 
-            return torch.cat((pred1_in, pred2_in, rel_context), dim=1)
+            if attention_wts:
+                return torch.cat((pred1_in, pred2_in, rel_context), dim=1), att, att_raw
+            else:
+                return torch.cat((pred1_in, pred2_in, rel_context), dim=1)
 
 
     def _preprocess_inputs(self, inputs):
