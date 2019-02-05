@@ -43,11 +43,13 @@ class TemporalModel(torch.nn.Module):
                 mlp_dropout = 0.5,
                 elmo_class = None,
                 mlp_activation="tanh",
+                coarse_init_model = None,
+                coarser_init_model = None, 
                 duration_distr = False,
                 attention=True, event_attention='root', dur_attention = 'param', 
                 rel_attention = 'param', dur_MLP_sizes = [24], fine_MLP_sizes = [24],
-                coarse_MLP_sizes = [24], dur_output_size = 11, fine_output_size = 4,
-                coarse_output_size = 7, coarser_output_size = 13,
+                coarse_MLP_sizes = [24], coarser_MLP_sizes = [24], dur_output_size = 11, fine_output_size = 4,
+                coarse_output_size = 13, coarser_output_size = 7,
                 device=torch.device(type="cpu") ):
         super().__init__()
 
@@ -79,7 +81,10 @@ class TemporalModel(torch.nn.Module):
 
         self._init_MLP(tune_embed_size, fine_MLP_sizes, fine_output_size, param="fine")
         self._init_MLP(tune_embed_size, coarse_MLP_sizes,coarse_output_size, param="coarse")
-        self._init_MLP(tune_embed_size, coarse_MLP_sizes, coarser_output_size, param="coarser")
+        self._init_MLP(tune_embed_size, coarser_MLP_sizes, coarser_output_size, param="coarser")
+        
+        # self._init_MLP(4, coarse_MLP_sizes,coarse_output_size, param="coarse2")
+        # self._init_MLP(4, coarser_MLP_sizes, coarser_output_size, param="coarser2")
 
     def _init_attention(self):
 
@@ -136,6 +141,9 @@ class TemporalModel(torch.nn.Module):
             elif self.event_attention != "root" and self.dur_attention !="root":
                 input_size = input_size*3
 
+        elif param=="coarse2" or param=="coarser2":
+            input_size=input_size
+
         else:
             if self.event_attention == "root" and self.rel_attention == "root":
                 input_size = input_size*2
@@ -187,29 +195,72 @@ class TemporalModel(torch.nn.Module):
         pred1_dur = self._run_duration_attention(inputs, pred1_out)
         pred2_dur = self._run_duration_attention(inputs, pred2_out)
 
-        #Run through relative_temporal type:
+        ##Run through relative_temporal type:
         rel_output = self._run_relation_attention(inputs, pred1_out, pred2_out)
 
-        #Run Duration-MLP
+        ##Run Duration-MLP
         pred1_dur = self._run_regression(pred1_dur, param="duration", activation=self.mlp_activation)
         pred2_dur = self._run_regression(pred2_dur, param="duration", activation=self.mlp_activation)
+
+        #Run Fine-grained-MLP
+        fine_output_raw = self._run_regression(rel_output, param="fine", activation=self.mlp_activation)
+    
+        fine_output = self._squash_finegrained(fine_output_raw)
+
+        #Run Coarse-grained MLP
+        coarse_output = self._run_regression(rel_output, param="coarse", activation=self.mlp_activation)
+        #Run Coarser-grained MLP
+        coarser_output = self._run_regression(rel_output, param="coarser", activation=self.mlp_activation)
+
+        # pred1_dur = fine_output[:,1]
+        # pred2_dur = fine_output[:,3]
+        # fine_output_mod = fine_output.clone()
+        # fine_output_mod[:,1] = fine_output_mod[:,0].clone() + fine_output_mod[:,1].clone()
+        # fine_output_mod[:,3] = fine_output_mod[:,2].clone() + fine_output_mod[:,3].clone()
+
+        # ##Run Coarse-grained MLP
+        # coarse_output2 = self._run_regression(fine_output_mod, param="coarse2", activation=self.mlp_activation)
+        # ##Run Coarser-grained MLP
+        # coarser_output2 = self._run_regression(fine_output_mod, param="coarser2", activation=self.mlp_activation)
 
         if self.duration_distr:
             pred1_dur = self._binomial_dist(pred1_dur)
             pred2_dur = self._binomial_dist(pred2_dur)
 
-        #Run Fine-grained-MLP
-        fine_output = self._run_regression(rel_output, param="fine", activation=self.mlp_activation)
-        
-        #Run Coarse-grained MLP
-        coarse_output = self._run_regression(rel_output, param="coarse", activation=self.mlp_activation)
-
-        #Run Coarser-grained MLP
-        coarser_output = self._run_regression(rel_output, param="coarser", activation=self.mlp_activation)
-
         y_hat = (pred1_dur, pred2_dur, fine_output, coarse_output, coarser_output)
+        # y_hat = (pred1_dur, pred2_dur, fine_output, coarse_output, coarser_output, coarse_output2, coarser_output2)
 
         return y_hat
+
+    def _squash_finegrained(self, fine_output):
+        '''
+        Input: raw fine-grained out 
+                Dimensions: batch-size x 4
+
+        Output: squashed fine-grained values:
+                Dimensions: batch-size x 4
+        '''
+        #Squash durations to be positive:
+        fine_output_squashed = fine_output.clone().to(self.device)
+
+        ###Make durations  positive:
+        fine_output_squashed[:,1] = torch.abs(fine_output_squashed[:,1].clone().to(self.device))
+        fine_output_squashed[:,3] = torch.abs(fine_output_squashed[:,3].clone().to(self.device))
+        
+        ## Replace durations with squashed end-points
+        fine_output_squashed[:,1] = torch.sigmoid(fine_output_squashed[:,0]+fine_output_squashed[:,1].clone().to(self.device))
+        fine_output_squashed[:,3] = torch.sigmoid(fine_output_squashed[:,2]+fine_output_squashed[:,3].clone().to(self.device))
+
+        ## Squash beginning-points
+        fine_output_squashed[:,0] = torch.sigmoid(fine_output[:,0])
+        fine_output_squashed[:,2] = torch.sigmoid(fine_output[:,2])
+
+        ## Replace end-points with durations:
+        fine_output_squashed[:,1] = fine_output_squashed[:,1] - fine_output_squashed[:,0]
+        fine_output_squashed[:,3] = fine_output_squashed[:,3] - fine_output_squashed[:,2] 
+
+        return fine_output_squashed
+
 
     def _binomial_dist(self, pred_dur):
         '''
@@ -409,10 +460,15 @@ class TemporalModel(torch.nn.Module):
 
             h_last = linear_map(h_last)
 
-        if param=="fine":
-            return torch.sigmoid(h_last)
-        else:
-            return h_last
+        ## uncomment in case sigmoid is needed for fine-grained predictions
+        # if param=="fine":
+        #     return torch.sigmoid(h_last)
+        # else:
+        #     return h_last
+
+        return h_last
+
+        
         
     
     def _postprocess_outputs(self, outputs):
@@ -445,6 +501,8 @@ class TemporalTrainer(object):
                  predict_batch_size = 256,
                  epochs=5,
                  logmax = 0.9999999,
+                 loss_conf = True,
+                 class_wt = False,
                  model_file_suffix = ".pth",
                 **kwargs):
         
@@ -453,14 +511,21 @@ class TemporalTrainer(object):
         self.train_batch_size = train_batch_size
         self.predict_batch_size = predict_batch_size
         self.predict_loss_batch_size = predict_loss_batch_size
+        self.loss_conf = loss_conf #whether to use confidence weighted loss
+        self.class_wt = class_wt #whether to use class weighted loss for temporal relations
 
         self.best_model_file = model_file_prefix + "model_" + kwargs['event_attention'] +  \
                                 "_" + kwargs['dur_attention'] +  \
                                 "_" + kwargs['rel_attention'] + \
-                                "_" + "_".join([str(x) for x in kwargs['dur_MLP_sizes']]) + \
-                                "_optim_" + str(optim_wt_decay) + \
+                                "_" + str(int(loss_conf)) + \
+                                "_" + str(int(class_wt)) + \
+                                "_" + "-".join([str(x) for x in kwargs['dur_MLP_sizes']]) + \
+                                "_" + "-".join([str(x) for x in kwargs['fine_MLP_sizes']]) + \
+                                "_" + "-".join([str(x) for x in kwargs['coarse_MLP_sizes']]) + \
+                                "_" + "-".join([str(x) for x in kwargs['coarser_MLP_sizes']]) + \
+                                "_" + str(optim_wt_decay) + \
                                 "_" + str(kwargs['mlp_dropout']) + "_" + kwargs['mlp_activation'] + \
-                                "_binom_" + str(kwargs['duration_distr']) +\
+                                "_" + str(int(kwargs['duration_distr'])) +\
                                 model_file_suffix
 
         self._regression_type = regression_type
@@ -516,6 +581,7 @@ class TemporalTrainer(object):
         '''
         batch_size = len(durations)
         out_p1_d, out_p2_d, out_f, out_coarse, out_coarser = model_out
+        # out_p1_d, out_p2_d, out_f, out_coarse, out_coarser, out_coarse2, out_coarser2 = model_out
 
         #Store actual_y into tensors
         pred1_durs = [p for p,q in durations]
@@ -524,8 +590,17 @@ class TemporalTrainer(object):
         pred1_durs, pred2_durs, time_ml_coarse, time_ml_coarser = self._lsts_to_tensors(pred1_durs,pred2_durs,
                                                                  time_ml_coarse, time_ml_coarser)
 
+        
         pred1_conf, pred2_conf, rel_conf = self._lsts_to_tensors(pred1_conf,pred2_conf,
                                                                  rel_conf, param="float")
+
+
+        # All conf equal:
+        if not self.loss_conf:
+            pred1_conf =  torch.ones((batch_size,), dtype=torch.float).to(self.device)
+            pred2_conf =  torch.ones((batch_size,), dtype=torch.float).to(self.device)
+            rel_conf =  torch.ones((batch_size,), dtype=torch.float).to(self.device)
+
 
         b_p1 = [p1[0] for p1, p2 in sliders]
         e_p1 = [p1[1] for p1, p2 in sliders]
@@ -548,30 +623,50 @@ class TemporalTrainer(object):
         L6 = torch.mm(rel_conf.unsqueeze(0), L6.unsqueeze(1))/batch_size
 
         #Coarser Loss
-        L7 = self.coarse_loss(out_coarser, time_ml_coarser)
+        L7 = self.coarser_loss(out_coarser, time_ml_coarser)
         L7 = torch.mm(rel_conf.unsqueeze(0), L7.unsqueeze(1))/batch_size
 
         # print("L6 : {}".format(L6))
-        max_tensor = torch.ones((batch_size,)).to(self.device)
-        max_tensor = max_tensor.new_full((batch_size,1), self.logmax)
-        max_tensor = max_tensor.view(batch_size)
+        # max_tensor = torch.ones((batch_size,)).to(self.device)
+        # max_tensor = max_tensor.new_full((batch_size,1), self.logmax)
+        # max_tensor = max_tensor.view(batch_size)
 
         ## Fine-grained Losses
-        L2 = torch.min(self.fine_loss(out_f[:, 0]-out_f[:, 2], b_p1-b_p2), max_tensor)
-        L3 = torch.min(self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2], e_p1-b_p2), max_tensor)
-        L4 = torch.min(self.fine_loss(out_f[:, 2]+out_f[:, 3]-out_f[:, 0], e_p2-b_p1), max_tensor)
-        L5 = torch.min(self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2]-out_f[:, 3], e_p1-e_p2), max_tensor)
+        L2 = self.fine_loss(out_f[:, 0]-out_f[:, 2], b_p1-b_p2)
+        L3 = self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2], e_p1-b_p2)
+        L4 = self.fine_loss(out_f[:, 2]+out_f[:, 3]-out_f[:, 0], e_p2-b_p1)
+        L5 = self.fine_loss(out_f[:, 0]+out_f[:, 1]-out_f[:, 2]-out_f[:, 3], e_p1-e_p2)
         
         # print("L2 {}, L3 {}, L4 {}, L5 {}".format(L2, L3, L4, L5))
 
-        L2to5 = sum([-torch.log(1-L2), -torch.log(1-L3), 
-            -torch.log(1-L4), -torch.log(1-L5)])/4
+        L2to5 = sum([-torch.log(1-L2/2), -torch.log(1-L3/2), 
+            -torch.log(1-L4/2), -torch.log(1-L5/2)])/4
 
         L2to5 = torch.mm(rel_conf.unsqueeze(0), L2to5.unsqueeze(1))/batch_size
+
+
+        ##Coarse Loss
+        # L8 = self.coarse_loss(out_coarse2, time_ml_coarse)
+        # L8 = torch.mm(rel_conf.unsqueeze(0), L8.unsqueeze(1))/batch_size
+        # ##Coarser Loss
+        # L9 = self.coarser_loss(out_coarser2, time_ml_coarser)
+        # L9 = torch.mm(rel_conf.unsqueeze(0), L9.unsqueeze(1))/batch_size
+
+        dur = (L1_p1+L1_p2)/2
+        coarse = L6
+        fine = L2to5
+        coarser = L7
+        beta=3.5
+        
+        total_loss = (sum([dur,  coarse, beta*fine, coarser])/4).squeeze()
+
+        # total_loss = (sum([dur,  coarse, beta*fine, coarser, L8, L9])/6).squeeze()
+
+       
         # print("L2to5 {}".format(L2to5))
         # print("final loss: {}".format(sum([(L1_p1+L1_p2)/2,  L6 , L2to5])/3))
 
-        return (sum([(L1_p1+L1_p2)/2,  L6, L2to5, L7])/4).squeeze()
+        return total_loss
 
     def fit(self, train_X, train_Y, dev, **kwargs):
         """Fit the Attention-based model
@@ -613,18 +708,33 @@ class TemporalTrainer(object):
         
         self._initialize_trainer_model()  
         
-        #Loss for duration:
+        ## Loss for duration:
         raw_durations = itertools.chain(*durations)
         # dur_wts = self._compute_class_weights(raw_durations)
         self.duration_loss = CrossEntropyLoss(reduction='none')
-        # print("Duration weights: {}".format(dur_wts))
+        #print("Duration weights: {}".format(dur_wts))
         self.duration_loss = self.duration_loss.to(self.device)
 
-        #Loss for time_ml class:
-        # coarse_wts = self._compute_class_weights(time_ml)
-        self.coarse_loss = CrossEntropyLoss(reduction='none')
-        # print("Coarse weights: {}".format(coarse_wts))
-        self.coarse_loss = self.coarse_loss.to(self.device)
+        ## Loss for time_ml_coarse class:
+        if self.class_wt:
+            coarse_wts = self._compute_class_weights(time_ml_coarse)
+            self.coarse_loss = CrossEntropyLoss(reduction='none', weight=coarse_wts)
+            print("Coarse weights: {}".format(coarse_wts))
+            self.coarse_loss = self.coarse_loss.to(self.device)
+        else:
+            self.coarse_loss = CrossEntropyLoss(reduction='none')
+            self.coarse_loss = self.coarse_loss.to(self.device)
+
+        ## Loss for time_ml_coarser class:
+        if self.class_wt:
+            coarser_wts = self._compute_class_weights(time_ml_coarser)
+            self.coarser_loss = CrossEntropyLoss(reduction='none', weight=coarser_wts)
+            print("Coarser weights: {}".format(coarser_wts))
+            self.coarser_loss = self.coarser_loss.to(self.device)
+        else:
+            self.coarser_loss = CrossEntropyLoss(reduction='none')
+            self.coarser_loss = self.coarser_loss.to(self.device)
+
 
         print("########## .   Model Parameters   ##############")
         for name,param in self._model.named_parameters():     
