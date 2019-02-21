@@ -181,7 +181,7 @@ class BaseModel(torch.nn.Module):
         ## Run MLP through the input:
         y_hat = self._run_regression(span_input, param="factuality", activation='relu')
 
-        y_hat = torch.exp(y_hat)*6 - 3.0
+        #y_hat = torch.exp(y_hat)*6 - 3.0
         
         return y_hat
         
