@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D  
+#import matplotlib.pyplot as plt
+#from matplotlib.lines import Line2D  
 
 from torch.nn import Parameter
 from torch.nn import MSELoss, L1Loss, SmoothL1Loss, CrossEntropyLoss
