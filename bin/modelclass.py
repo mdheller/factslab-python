@@ -27,6 +27,23 @@ from collections import Iterable, defaultdict
 import itertools
 
 from allennlp.commands.elmo import ElmoEmbedder
+from extract_bert import *
+
+def param_init(net, gain=1):
+  for p in net.parameters():
+    if p.requires_grad:
+      try:
+        torch.nn.init.xavier_normal(p, gain=gain)
+      except:
+        torch.nn.init.normal(p)
+        torch.Tensor.abs_(p.data)
+
+def param_init_by_module(net):
+  for m in net.modules():
+    if isinstance(m, torch.nn.Linear):
+      param_init(m, gain=torch.nn.init.calculate_gain('relu'))
+    else:
+      param_init(m)
 
 # from allennlp.modules.elmo import Elmo, batch_to_ids
 # options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
@@ -41,7 +58,9 @@ class BaseModel(torch.nn.Module):
     def __init__(self, 
                 output_size = 1,
                  embedding_size = 1024,
-                 elmo_class = None,
+                 bidirectional=True,
+                 rnn_layers=2,
+                 sentence_embed_dict = None,
                  tuned_embed_size = 256,
                  mlp_dropout = 0,
                  rnn_hidden_size = 300,
@@ -52,37 +71,71 @@ class BaseModel(torch.nn.Module):
         super().__init__()
         
         self.output_size = output_size
-        self.elmo_class = elmo_class
+        self.sentence_embed_dict = sentence_embed_dict
         self.tuned_embed_size = tuned_embed_size 
         self.embedding_size = embedding_size
         self.device = device
         self.MLP_sizes = MLP_sizes
         self.rnn_hidden_size = rnn_hidden_size
         self.embeddings_data = embeddings
+        self.bidirectional =  bidirectional
+        self.rnn_layers = rnn_layers
 
-        if not self.elmo_class:
-            self.vocab = list(self.embeddings_data.index)
-        else:
+
+        if self.sentence_embed_dict:
             self.vocab = None
+        else:
+            self.vocab = list(self.embeddings_data.index)
 
+        
         ## initialize MLP layers
         self.linear_maps = nn.ModuleDict()
         self.mlp_dropout =  nn.Dropout(mlp_dropout) 
 
-        ## initialize embedding-tuning MLP for elmo
-        if not self.vocab:
-            self.tuned_embed_MLP = nn.Linear(self.embedding_size*3, self.tuned_embed_size)
-            self.rnn = nn.LSTM(self.tuned_embed_size, self.rnn_hidden_size, num_layers=2, bidirectional=True)
-            self._init_MLP(self.tuned_embed_size*2, self.MLP_sizes, self.output_size, param="factuality")
-            
-
+    
         ## initialize embeddings:
-        if self.vocab:
+        if self.vocab:  #for glove
             self._init_embeddings()
-             ## initialize RNN layer
-            self.rnn = nn.LSTM(self.embedding_size, self.rnn_hidden_size, num_layers=2, bidirectional=True)
-             ## initialize MLP
-            self._init_MLP(self.embedding_size*2, self.MLP_sizes, self.output_size, param="factuality")
+        else:  #for elmo or bert (last three layers of bert or elmo)
+            self.tuned_embed_MLP = nn.Linear(self.embedding_size*3, self.tuned_embed_size)
+
+        #initialize RNNs:
+        self._init_rnn()
+            
+        ## initisalize MLP
+        if self.bidirectional:
+            self._init_MLP(self.rnn_hidden_size*2, self.MLP_sizes, self.output_size, param="factuality")
+        else:
+            self._init_MLP(self.rnn_hidden_size*2, self.MLP_sizes, self.output_size, param="factuality")
+
+        
+    def _init_rnn(self):
+        
+        
+        if self.bidirectional:
+            self.h0_param = torch.nn.Parameter(torch.randn(self.rnn_layers*2,
+                                                            self.rnn_hidden_size))
+            self.c0_param = torch.nn.Parameter(torch.randn(self.rnn_layers*2,
+                                                        self.rnn_hidden_size))
+            
+        else:
+            self.h0_param = torch.nn.Parameter(torch.randn(self.rnn_layers,
+                                                            self.rnn_hidden_size))
+            self.c0_param = torch.nn.Parameter(torch.randn(self.rnn_layers,
+                                                        self.rnn_hidden_size))
+
+        if self.vocab:
+            self.rnn = nn.LSTM(self.embedding_size, self.rnn_hidden_size, 
+                                                    num_layers=self.rnn_layers,
+                                                     bidirectional=self.bidirectional,
+                                                     batch_first=True)
+
+        else:
+            self.rnn = nn.LSTM(self.tuned_embed_size, self.rnn_hidden_size, 
+                                                        num_layers=self.rnn_layers, 
+                                                        bidirectional=self.bidirectional,
+                                                        batch_first=True)
+        
 
     
     def _init_embeddings(self):
@@ -119,38 +172,14 @@ class BaseModel(torch.nn.Module):
         linmap = linmap.to(self.device)
         self.linear_maps[param].append(linmap)
         
-    def _get_inputs(self, structures):
+    def _get_inputs(self, sentids, structures):
         '''
            Return embeddings as root, span or param span
 
            Inspired from: https://github.com/FACTSlab/factslab-python/blob/master/factslab/pytorch/mlpregression.py
         '''
-        if not self.vocab:
+        if self.vocab:
 
-            # character_ids = batch_to_ids(structures)
-            # embeddings = elmo(character_ids)
-            # inputs = embeddings['elmo_representations'][0].to(self.device)
-            # inputs = inputs.detach()
-            # masks = embeddings['mask'].to(self.device)
-            
-            inputs, masks = self.elmo_class.batch_to_embeddings(structures)
-            inputs = inputs.to(self.device)
-            masks = masks.to(self.device)
-            ## Concatenate ELMO's 3 layers
-            batch_size = inputs.size()[0]
-            max_length = inputs.size()[2]
-            inputs = inputs.permute(0,2,1,3) #dim0=batch_size, dim1=num_layers, dim2=sent_len, dim3=embedding-size
-            inputs = inputs.contiguous().view(batch_size, max_length, -1)
-            
-            ## Tune embeddings into lower dim:
-            masks = masks.unsqueeze(2).repeat(1, 1, self.tuned_embed_size).byte()
-            inputs = self._tune_embeddings(inputs)
-
-            inputs = inputs*masks.float()
-
-            return inputs, masks
-
-        else:
             # Glove embeddings
             indices = [[self.vocab_hash[word] for word in sent] for sent in structures]
 
@@ -163,44 +192,89 @@ class BaseModel(torch.nn.Module):
             # reduced_embeddings = self.embed_linmap(embeddings) * masks.float()
             return embeddings, masks
 
-    def forward(self, structures, indexes):
+
+            # character_ids = batch_to_ids(structures)
+            # embeddings = elmo(character_ids)
+            # inputs = embeddings['elmo_representations'][0].to(self.device)
+            # inputs = inputs.detach()
+            # masks = embeddings['mask'].to(self.device)
+            
+        else:
+            batch_embeds = [torch.tensor(self.sentence_embed_dict[sentid[0]], device=self.device) for sentid in sentids]
+            inputs = rnn_utils.pad_sequence(batch_embeds, batch_first=True)
+            masks = (inputs != 0).byte()
+            # print("raw inputs", inputs.shape)
+            # print("raw masks", masks.shape)
+
+            ## Tune embeddings into lower dim:
+            inputs = self._tune_embeddings(inputs)
+
+            masks = masks[:, :, 0].reshape(masks.shape[0], 
+                                                masks.shape[1], 
+                                                1).repeat(1,1,self.tuned_embed_size)
+
+            # print("lower dim inputs: ", inputs.shape)
+            # print("lower dim masks: ", masks.shape)
+            
+            inputs = inputs*masks.float()
+
+            return inputs, masks
+
+
+    def forward(self, sentids, structures, indexes):
         
-        inputs, masks = self._get_inputs(structures)
+        inputs, masks = self._get_inputs(sentids, structures)
+        # print("Inputs size", inputs.shape)
+        # print("Mask size", masks.shape)
+
+        batch_size = inputs.size()[0]
+        # print("Batch-size", batch_size)
+
+        h0 = self.h0_param.repeat(batch_size,1, 1).permute(1,0,2).contiguous()
+        c0 = self.c0_param.repeat(batch_size,1, 1).permute(1,0,2).contiguous()
+
+        # print("Initial h0 size:", h0.shape)
 
         ##Run a Bi-LSTM:
-        inputs, (hn, cn) = self.rnn(inputs)
+        inputs, (hn, cn) = self.rnn(inputs, (h0,c0))
+        # print("lstm output shape", inputs.shape)
 
         ##convert masked tokens to zero after passing through Bi-lstm
-        bilstm_masks = masks.repeat(1,1,2)
+        bilstm_masks = masks[:, :, 0].reshape(masks.shape[0], 
+                                                masks.shape[1], 
+                                                1).repeat(1,1,inputs.shape[-1])
+
+        # print("lstm masks output shape", bilstm_masks.shape)
         inputs = inputs*bilstm_masks.float()
 
+
         ## Extract index-span inputs:
-        span_input = self._extract_span_inputs(inputs, indexes)
-        #print("Span input shape: {}".format(span_input.shape))
+        span_output = self._extract_span_inputs(inputs, indexes)
+        # print("Span output shape: {}".format(span_output.shape))
         
         ## Run MLP through the input:
-        y_hat = self._run_regression(span_input, param="factuality", activation='relu')
+        y_hat = self._run_regression(span_output, param="factuality", activation='relu')
 
-        #y_hat = torch.exp(y_hat)*6 - 3.0
-        
+        # print("Y-hat shape", y_hat.shape)
         return y_hat
         
     def _extract_span_inputs(self, inputs, span_idxs):
         '''
         Extract embeddings for a span in the sentence
         
+        Input dimension: batch_size x max_length x rnn_hidden_size
+
+        Output dimension: batch_size x span_length x rnn_hidden_size
+
         For a mini-batch, keeps the length of span equal to the length 
         max span in that batch
         '''
         batch_size = inputs.size()[0]
         span_lengths = [len(x) for x in span_idxs]
         max_span_len = max(span_lengths)
-        
-        if self.vocab: #glove
-            span_embeds = torch.zeros((batch_size, max_span_len, self.embedding_size*2), 
-                                  dtype=torch.float, device=self.device)
-        else: #elmo
-            span_embeds = torch.zeros((batch_size, max_span_len, self.tuned_embed_size*2), 
+        embed_len = inputs.size()[-1]
+
+        span_embeds = torch.zeros((batch_size, max_span_len, embed_len), 
                                   dtype=torch.float, device=self.device)
         
         for sent_idx in range(batch_size):
@@ -340,6 +414,9 @@ class BaseTrainer(object):
             dev_x, dev_y = dev
             
         self._initialize_trainer_model() 
+
+        ## Initialisation
+        param_init_by_module(self._model)
         
         print("########## .   Model Parameters   ##############")
         for name,param in self._model.named_parameters():     
@@ -367,7 +444,9 @@ class BaseTrainer(object):
             batch_losses = []
             # Turn on training mode which enables dropout.
             self._model.train()
-            
+
+            self._model.to(self.device)
+                        
             bidx_i = 0
             bidx_j =self.train_batch_size
             
@@ -377,14 +456,15 @@ class BaseTrainer(object):
             pbar = tqdm_n(total = total_obs//self.train_batch_size)
             
             while bidx_j < total_obs:
-                words = [words for words, spans in self._X[bidx_i:bidx_j]]
-                spans = [spans for words, spans in self._X[bidx_i:bidx_j]]
+                sentids = [sentids for sentids, words, spans in self._X[bidx_i:bidx_j]]
+                words = [words for sentid, words, spans in self._X[bidx_i:bidx_j]]
+                spans = [spans for sentid, words, spans in self._X[bidx_i:bidx_j]]
                 
                 ##Zero grad
                 optimizer.zero_grad()
 
                 ##Calculate Loss
-                model_out  = self._model(words, spans)   
+                model_out  = self._model(sentids, words, spans)   
                 
                 if self.pretraining:
                     curr_loss = self._custom_loss(model_out, self._Y[bidx_i:bidx_j], pretrain_x, pretrain_actual)
@@ -402,13 +482,14 @@ class BaseTrainer(object):
                 bidx_j = bidx_i + self.train_batch_size
                 
                 if bidx_j >= total_obs:
-                    words = [words for words, spans in self._X[bidx_i:bidx_j]]
-                    spans = [spans for words, spans in self._X[bidx_i:bidx_j]]
+                    sentids = [sentids for sentids, words, spans in self._X[bidx_i:bidx_j]]
+                    words = [words for sentid, words, spans in self._X[bidx_i:bidx_j]]
+                    spans = [spans for sentid, words, spans in self._X[bidx_i:bidx_j]]
                     ##Zero grad
                     optimizer.zero_grad()
 
                     ##Calculate Loss
-                    model_out  = self._model(words, spans)   
+                    model_out  = self._model(sentids, words, spans)   
                     
                     if self.pretraining:
                         curr_loss = self._custom_loss(model_out, self._Y[bidx_i:bidx_j], pretrain_x, pretrain_actual)
@@ -433,7 +514,7 @@ class BaseTrainer(object):
             if self.data_name == "megaverid":
                 if curr_train_loss < best_loss:
                     with open(self.best_model_file, 'wb') as f:
-                        torch.save(self._model.state_dict(), f)
+                        torch.save(self._model.to(torch.device("cpu")).state_dict(), f)
                     best_loss = curr_train_loss
                 
                 ## Stop training when loss converges
@@ -458,7 +539,7 @@ class BaseTrainer(object):
 
                 if curr_dev_r[0] > best_r:
                     with open(self.best_model_file, 'wb') as f:
-                        torch.save(self._model.state_dict(), f)
+                        torch.save(self._model.to(torch.device("cpu")).state_dict(), f)
                     best_r = curr_dev_r[0]
             
 
@@ -474,7 +555,7 @@ class BaseTrainer(object):
                     else:
                         bad_count=0
 
-                if bad_count >=3:
+                if bad_count >=2:
                     break
 
                 dev_rs.append(curr_dev_r[0])
@@ -496,22 +577,24 @@ class BaseTrainer(object):
         yhat = torch.zeros(total_obs).to(self.device)
 
         while bidx_j < total_obs:
-            words = [words for words, spans in data_x[bidx_i:bidx_j]]
-            spans = [spans for words, spans in data_x[bidx_i:bidx_j]]
+            sentids = [sentids for sentids, words, spans in data_x[bidx_i:bidx_j]]
+            words = [words for sentids, words, spans in data_x[bidx_i:bidx_j]]
+            spans = [spans for sentids, words, spans in data_x[bidx_i:bidx_j]]
         
             ##Calculate Loss
-            model_out  = self._model(words, spans)   
+            model_out  = self._model(sentids, words, spans)   
             yhat[bidx_i:bidx_j] = model_out.squeeze()
             
             bidx_i = bidx_j
             bidx_j = bidx_i + self.train_batch_size
             
             if bidx_j >= total_obs:
-                words = [words for words, spans in data_x[bidx_i:bidx_j]]
-                spans = [spans for words, spans in data_x[bidx_i:bidx_j]]
+                sentids = [sentids for sentids, words, spans in data_x[bidx_i:bidx_j]]
+                words = [words for sentids, words, spans in data_x[bidx_i:bidx_j]]
+                spans = [spans for sentids, words, spans in data_x[bidx_i:bidx_j]]
                 
                 ##Calculate Loss
-                model_out  = self._model(words, spans)   
+                model_out  = self._model(sentids, words, spans)   
                 yhat[bidx_i:bidx_j] = model_out.squeeze()
                 
         return yhat
@@ -531,11 +614,12 @@ class BaseTrainer(object):
             yhat = torch.zeros(total_obs).to(self.device)
 
             while bidx_j < total_obs:
-                words = [words for words, spans in data_x[bidx_i:bidx_j]]
-                spans = [spans for words, spans in data_x[bidx_i:bidx_j]]
+                sentids = [sentids for sentids, words, spans in data_x[bidx_i:bidx_j]]
+                words = [words for sentids, words, spans in data_x[bidx_i:bidx_j]]
+                spans = [spans for sentids, words, spans in data_x[bidx_i:bidx_j]]
             
                 ##Calculate Loss
-                model_out  = self._model(words, spans)   
+                model_out  = self._model(sentids, words, spans)   
                 yhat[bidx_i:bidx_j] = model_out.squeeze()
 
                 if self.pretraining:
@@ -553,11 +637,12 @@ class BaseTrainer(object):
                 bidx_j = bidx_i + self.train_batch_size
                 
                 if bidx_j >= total_obs:
-                    words = [words for words, spans in data_x[bidx_i:bidx_j]]
-                    spans = [spans for words, spans in data_x[bidx_i:bidx_j]]
+                    sentids = [sentids for sentids, words, spans in data_x[bidx_i:bidx_j]]
+                    words = [words for sentids, words, spans in data_x[bidx_i:bidx_j]]
+                    spans = [spans for sentids, words, spans in data_x[bidx_i:bidx_j]]
                     
                     ##Calculate Loss
-                    model_out  = self._model(words, spans)   
+                    model_out  = self._model(sentids, words, spans)   
                     yhat[bidx_i:bidx_j] = model_out.squeeze()
                     if self.pretraining:
                         curr_loss = self._custom_loss(model_out, data_y[bidx_i:bidx_j], self.pretrain_x, self.pretrain_actual)
